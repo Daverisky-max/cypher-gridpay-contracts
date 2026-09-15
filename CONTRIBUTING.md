@@ -1,6 +1,6 @@
-# Contributing to FacilPay Smart Contracts
+# Contributing to Cypher GridPay Smart Contracts
 
-Thank you for your interest in contributing to FacilPay! We welcome contributions from the community to help build secure and reliable payment infrastructure on Stellar.
+Thank you for your interest in contributing to Cypher GridPay! We welcome contributions from the community to help build secure and reliable payment infrastructure on Stellar.
 
 ## 📜 Code of Conduct
 
@@ -20,8 +20,8 @@ Before you begin, ensure you have:
 
 1. **Fork and clone the repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/facilpay-contracts.git
-   cd facilpay-contracts
+   git clone https://github.com/YOUR_USERNAME/cypher-gridpay-contracts.git
+   cd cypher-gridpay-contracts
    ```
 
 2. **Add wasm target**
@@ -257,7 +257,7 @@ We welcome feature suggestions! Please:
 
 1. Check existing issues to avoid duplicates
 2. Clearly describe the feature and use case
-3. Explain how it benefits FacilPay users
+3. Explain how it benefits Cypher GridPay users
 4. Consider backwards compatibility
 
 ## 📋 Pull Request Checklist
@@ -285,4 +285,4 @@ We especially welcome contributions in:
 
 ---
 
-Thank you for helping make FacilPay better! 🙏
+Thank you for helping make Cypher GridPay better! 🙏

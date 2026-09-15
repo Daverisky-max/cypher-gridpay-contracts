@@ -1,0 +1,21 @@
+[package]
+name = "admin"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+escrow = { path = "../../../core/contracts/escrow" }
+payments = { path = "../../../core/contracts/payment" }
+refund = { path = "../../../core/contracts/refund" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+escrow = { path = "../../../core/contracts/escrow" }
+payments = { path = "../../../core/contracts/payment" }
+refund = { path = "../../../core/contracts/refund" }

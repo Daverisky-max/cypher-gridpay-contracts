@@ -1,10 +1,10 @@
-# FacilPay Smart Contracts
+# Cypher GridPay Smart Contracts
 
-Stellar-based smart contracts for FacilPay. Secure, auditable, and transparent payment infrastructure.
+Stellar-based smart contracts for Cypher GridPay. Secure, auditable, and transparent payment infrastructure.
 
 ## 🏗️ Architecture
 
-FacilPay uses Soroban smart contracts on Stellar for:
+Cypher GridPay uses Soroban smart contracts on Stellar for:
 - **Payment Processing**: Accept and lock crypto payments
 - **Settlement**: Convert and transfer to merchants in USDC
 - **Escrow**: Hold funds during dispute periods
@@ -41,25 +41,26 @@ make
 ### Run Tests
 
 ```bash
-# Test all contracts in workspace
-cargo test --workspace
+# Run all workspace tests (core + orchestrator)
+make test
 
-# Test specific contract
-cargo test -p escrow
-cargo test -p payment
-cargo test -p refund
+# Core workspace (escrow, payments, refund)
+cargo test --workspace      # from inside core/
+
+# Orchestrator workspace (admin)
+cargo test --workspace      # from inside orchestrator/
 
 # Test a single test file or function within a contract
-cargo test -p refund test_arbitration_fees
-cargo test -p escrow test_dispute_resolution
+cargo test -p refund test_arbitration_fees   # from inside core/
+cargo test -p escrow test_dispute_resolution # from inside core/
 
 # Run tests matching a pattern
-cargo test -p payment test_fee
+cargo test -p payments test_fee # from inside core/
 ```
 
 ## 📂 Contract Overview
 
-### Payment Contract (`contracts/payment`)
+### Payment Contract (`core/contracts/payment`)
 
 Handles payment creation and processing:
 - `create_payment()` - Customer initiates payment
@@ -67,14 +68,14 @@ Handles payment creation and processing:
 - `refund_payment()` - Admin refunds to customer
 - `get_payment()` - Query payment details
 
-### Escrow Contract (`contracts/escrow`)
+### Escrow Contract (`core/contracts/escrow`)
 
 Manages fund holding and disputes:
 - `create_escrow()` - Lock funds
 - `release_escrow()` - Release to merchant
 - `dispute_escrow()` - Handle disputes
 
-### Refund Contract (`contracts/refund`)
+### Refund Contract (`core/contracts/refund`)
 
 Processes refund requests:
 - `request_refund()` - Merchant initiates
@@ -109,8 +110,8 @@ Recommended migration path:
 
 - [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
 - Telegram: https://t.me/+afM9uh7GGtVkYmZk
-- [API Repository](https://github.com/facilpay/facilpay-api)
-- [SDK Repository](https://github.com/facilpay/facilpay-sdk)
+- [API Repository](https://github.com/cypher-gridpay/cypher-gridpay-api)
+- [SDK Repository](https://github.com/cypher-gridpay/cypher-gridpay-sdk)
 
 
 ## License
