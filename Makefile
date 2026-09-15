@@ -3,25 +3,20 @@ default: build
 all: test
 
 test: build
-	cargo test
+	$(MAKE) -C core test
+	$(MAKE) -C orchestrator test
 
 build:
-	stellar contract build
-	@ls -l target/wasm32v1-none/release/*.wasm
-	@$(MAKE) check-size
+	$(MAKE) -C core build
+	$(MAKE) -C orchestrator build
 
 check-size:
-	@MAX_SIZE=262144; \
-	for wasm in target/wasm32v1-none/release/*.wasm; do \
-		size=$$(wc -c < "$$wasm"); \
-		if [ "$$size" -gt "$$MAX_SIZE" ]; then \
-			echo "$$wasm is too large: $$size bytes (limit: $$MAX_SIZE)"; \
-			exit 1; \
-		fi; \
-	done
+	$(MAKE) -C core check-size
 
 fmt:
-	cargo fmt --all
+	$(MAKE) -C core fmt
+	$(MAKE) -C orchestrator fmt
 
 clean:
-	cargo clean
+	$(MAKE) -C core clean
+	$(MAKE) -C orchestrator clean

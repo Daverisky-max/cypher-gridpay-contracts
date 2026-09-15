@@ -15,41 +15,65 @@ jobs:
           target: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - name: Cache Cargo registry and build artifacts
+      - name: Install Stellar CLI
+        run: curl -fsSL https://github.com/stellar/stellar-cli/raw/main/install.sh | sh -s -- --dir ~/.cargo/bin
+
+      - name: Cache Cargo registry and build artifacts (core)
         uses: actions/cache@v3
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            core/target
+          key: ${{ runner.os }}-cargo-core-${{ hashFiles('core/Cargo.lock') }}
 
-      - name: Install Stellar CLI
-        run: curl -fsSL https://github.com/stellar/stellar-cli/raw/main/install.sh | sh -s -- --dir ~/.cargo/bin
+      - name: Cache Cargo registry and build artifacts (orchestrator)
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            orchestrator/target
+          key: ${{ runner.os }}-cargo-orchestrator-${{ hashFiles('orchestrator/Cargo.lock') }}
 
       - name: Format Check
-        run: cargo fmt --check
+        run: |
+          make fmt
+          git diff --exit-code
 
-      - name: Clippy Lints
-        run: cargo clippy -- -D warnings
+      - name: Clippy Lints (core)
+        run: cargo clippy --workspace -- -D warnings
+        working-directory: core
 
-      - name: Run Tests
+      - name: Clippy Lints (orchestrator)
+        run: cargo clippy --workspace -- -D warnings
+        working-directory: orchestrator
+
+      - name: Build Contracts (core)
+        run: make build
+        working-directory: core
+
+      - name: Build Contracts (orchestrator)
+        run: make build
+        working-directory: orchestrator
+
+      - name: Check WASM Binary Sizes (core)
+        run: make check-size
+        working-directory: core
+
+      - name: Run Tests (core)
         run: cargo test --workspace 2>&1 | tee test-output.txt
+        working-directory: core
+
+      - name: Run Tests (orchestrator)
+        run: cargo test --workspace 2>&1 | tee test-output.txt
+        working-directory: orchestrator
 
       - name: Upload test output artifact
         uses: actions/upload-artifact@v3
         if: always()
         with:
           name: test-output
-          path: test-output.txt
-
-      - name: Build Contracts
-        run: stellar contract build
-
-      - name: Check WASM Binary Sizes
-        run: |
-          MAX_SIZE=262144
-          for wasm in target/wasm32v1-none/release/*.wasm; do
-            size=$(wc -c < "$wasm")
-            [ "$size" -le "$MAX_SIZE" ] || (echo "$wasm is too large: $size bytes (limit: $MAX_SIZE)" && exit 1)
-          done
+          path: |
+            core/test-output.txt
+            orchestrator/test-output.txt

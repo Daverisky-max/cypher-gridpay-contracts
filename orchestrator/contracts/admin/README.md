@@ -1,6 +1,6 @@
 # Admin Contract
 
-Part of the [FacilPay smart contracts](../../README.md) suite on Stellar/Soroban.
+Part of the [Cypher GridPay smart contracts](../../README.md) suite on Stellar/Soroban.
 
 ## Purpose
 

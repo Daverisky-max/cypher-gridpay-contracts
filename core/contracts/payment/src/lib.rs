@@ -5535,7 +5535,7 @@ impl PaymentContract {
             return Ok(PaymentContract::get_conversion_rate(env, currency));
         }
 
-        let args = (cfg.price_feed_id.clone(),).into_val(&env);
+        let args = soroban_sdk::vec![&env, cfg.price_feed_id.to_val()];
         let fetched = env
             .try_invoke_contract::<(i128, u64), Error>(
                 &cfg.oracle_address,
@@ -7747,7 +7747,13 @@ impl PaymentContract {
     }
 
     /// Calculates the fee for a given amount and merchant (accounting for tier discount and waivers).
-    pub fn calculate_fee(env: Env, amount: i128, merchant: Address) -> i128 {
+    pub fn calculate_fee(
+        env: Env,
+        amount: i128,
+        merchant: Address,
+        customer: Address,
+        currency: Currency,
+    ) -> i128 {
         let config: Option<FeeConfig> = env
             .storage()
             .instance()
@@ -7929,24 +7935,8 @@ impl PaymentContract {
         }
 
         let record = PaymentContract::get_or_default_merchant_fee_record(env, merchant.clone());
-        let risk_config: RiskFeeConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::RiskFeeConfig))
-            .unwrap_or(RiskFeeConfig {
-                base_fee_bps: 100,
-                large_amount_threshold: 1000000,
-                large_amount_surcharge_bps: 50,
-                new_customer_surcharge_bps: 100,
-                high_risk_currency_surcharge: 200,
-            });
-        let risk_surcharge_bps = PaymentContract::calculate_risk_score(
-            env.clone(),
-            customer.clone(),
-            merchant.clone(),
-            amount,
-            currency,
-        );
+        let risk_surcharge_bps =
+            PaymentContract::risk_surcharge_bps(env, customer, amount, &currency);
         let effective_bps = (config.fee_bps as u64 + risk_surcharge_bps as u64).min(1000u64) as u32;
         let fee = PaymentContract::compute_fee_amount(
             amount,
@@ -8808,6 +8798,7 @@ impl PaymentContract {
         }
 
         let mut results = Vec::new(&env);
+        let mut groups: Vec<(Address, Address, i128)> = Vec::new(&env);
 
         for entry in entries.iter() {
             // Validate currency
@@ -8900,7 +8891,7 @@ impl PaymentContract {
                 amount: entry.amount,
                 token: entry.token.clone(),
                 currency: entry.currency.clone(),
-                status: PaymentStatus::Pending, // completed via do_complete_payment below
+                status: PaymentStatus::Completed, // optimized batch: create + complete in one call
                 created_at: current_timestamp,
                 expires_at,
                 metadata: entry.metadata.clone(),
@@ -8988,14 +8979,22 @@ impl PaymentContract {
                 entry.currency.clone(),
             );
 
-            // Transfer from customer to contract
+            // Pull merchant proceeds into the contract, then settle to merchant.
             let token_client = token::Client::new(&env, &entry.token);
+            let contract_address = env.current_contract_address();
             token_client.transfer_from(
                 &contract_address,
                 &entry.customer,
                 &contract_address,
                 &net_amount,
             );
+
+            PaymentContract::settle_or_accumulate(
+                &env,
+                entry.merchant.clone(),
+                entry.token.clone(),
+                net_amount,
+            )?;
 
             // Update merchant fee record
             PaymentContract::update_merchant_fee_record_post_completion(
@@ -9057,6 +9056,12 @@ impl PaymentContract {
             if !found {
                 groups.push_back((entry.token.clone(), entry.merchant.clone(), net_amount));
             }
+
+            results.push_back(BatchResult {
+                payment_id,
+                success: true,
+                error_code: None,
+            });
         }
 
         Ok(results)
@@ -12654,8 +12659,7 @@ impl PaymentContract {
 
     /// Executes a payment using the provided route.
     /// Validates the route is still valid (fee_bps matches current config) before executing.
-    pub fn // Fixed issue 565
-    // execute_routed_payment(
+    pub fn execute_routed_payment(
         env: Env,
         customer: Address,
         merchant: Address,
