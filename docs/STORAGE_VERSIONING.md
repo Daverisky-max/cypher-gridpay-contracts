@@ -1,6 +1,6 @@
 # Storage Schema Versioning
 
-FacilPay Soroban smart contracts (`contracts/payment`, `contracts/refund`, `contracts/escrow`) implement an explicit storage schema versioning convention. This allows deployed contracts to track their data storage layout version on-chain and perform state migrations as stored data structures evolve over time.
+Cypher GridPay Soroban smart contracts (`core/contracts/payment`, `core/contracts/refund`, `core/contracts/escrow`) implement an explicit storage schema versioning convention. This allows deployed contracts to track their data storage layout version on-chain and perform state migrations as stored data structures evolve over time.
 
 ---
 
@@ -29,7 +29,7 @@ When modifying an existing stored data structure (such as adding fields to a str
    - Adding non-optional fields or re-interpreting existing byte encodings requires a schema migration.
 
 2. **Define Migration Logic**:
-   - Update `migrate_schema()` in the relevant contract (e.g., [`contracts/payment/src/lib.rs`](../contracts/payment/src/lib.rs) or [`contracts/refund/src/lib.rs`](../contracts/refund/src/lib.rs)) to handle reading historical data shapes and writing upgraded data structures.
+   - Update `migrate_schema()` in the relevant contract (e.g., [`core/contracts/payment/src/lib.rs`](../core/contracts/payment/src/lib.rs) or [`core/contracts/refund/src/lib.rs`](../core/contracts/refund/src/lib.rs)) to handle reading historical data shapes and writing upgraded data structures.
 
 3. **Increment Target Schema Version**:
    - Ensure contract calls specify the new target version integer (`target_version > current_version`).
@@ -46,8 +46,8 @@ When modifying an existing stored data structure (such as adding fields to a str
 
 The repository includes explicit tests demonstrating schema version initialization and migration enforcement:
 
-- **Payment Contract**: [`contracts/payment/src/schema_version_test.rs`](../contracts/payment/src/schema_version_test.rs)
-- **Refund Contract**: [`contracts/refund/src/schema_version_test.rs`](../contracts/refund/src/schema_version_test.rs)
+- **Payment Contract**: [`core/contracts/payment/src/schema_version_test.rs`](../core/contracts/payment/src/schema_version_test.rs)
+- **Refund Contract**: [`core/contracts/refund/src/schema_version_test.rs`](../core/contracts/refund/src/schema_version_test.rs)
 
 ### Example Test Pattern
 

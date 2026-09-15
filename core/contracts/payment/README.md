@@ -1,10 +1,10 @@
 # Payment Contract
 
-Part of the [FacilPay smart contracts](../../README.md) suite on Stellar/Soroban.
+Part of the [Cypher GridPay smart contracts](../../README.md) suite on Stellar/Soroban.
 
 ## Purpose
 
-The payment contract is the core of the FacilPay platform. It handles the full lifecycle of a payment: creation, completion, refunding, expiry, and cancellation. It also provides a rich set of optional features that can be composed on top of basic payments:
+The payment contract is the core of the Cypher GridPay platform. It handles the full lifecycle of a payment: creation, completion, refunding, expiry, and cancellation. It also provides a rich set of optional features that can be composed on top of basic payments:
 
 - **Escrowed payments** — funds held in an external escrow contract until released or disputed
 - **Scheduled payments** — payments deferred to a future ledger timestamp
@@ -606,7 +606,7 @@ completion — integrators do not need to do anything special when calling `comp
 | --------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `set_fee_config(admin, fee_config)`                 | Set platform-wide fee tiers and basis-point rates.                                 |
 | `get_fee_config()`                                  | Return the current `FeeConfig`.                                                    |
-| `calculate_fee(amount, merchant)`                   | Calculate the fee for a given amount and merchant tier.                            |
+| `calculate_fee(amount, merchant, customer, currency)` | Calculate the fee for a given amount, merchant tier, customer risk, and currency. |
 | `get_merchant_fee_record(merchant)`                 | Return a merchant's cumulative fee payment record.                                 |
 | `get_merchant_tier(merchant)`                       | Return the fee tier for a merchant based on volume.                                |
 | `manually_set_merchant_tier(admin, merchant, tier)` | Override a merchant's fee tier manually.                                           |

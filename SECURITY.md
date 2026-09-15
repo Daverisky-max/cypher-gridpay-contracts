@@ -1,6 +1,6 @@
 # Security Policy
 
-This document describes the security vulnerability disclosure process for the FacilPay smart contracts repository.
+This document describes the security vulnerability disclosure process for the Cypher GridPay smart contracts repository.
 
 ## Reporting a Vulnerability
 
