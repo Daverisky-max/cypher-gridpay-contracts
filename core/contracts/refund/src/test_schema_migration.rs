@@ -10,10 +10,10 @@ use soroban_sdk::{
     Address, Env, String,
 };
 
-fn setup(
+fn setup<'a>(
     env: &Env,
 ) -> (
-    RefundContractClient,
+    RefundContractClient<'a>,
     Address,
     Address,
     Address,

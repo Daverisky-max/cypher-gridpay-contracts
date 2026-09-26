@@ -8,10 +8,10 @@ use super::*;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env, String};
 
-fn setup(
+fn setup<'a>(
     env: &Env,
 ) -> (
-    PaymentContractClient,
+    PaymentContractClient<'a>,
     Address,
     Address,
     Address,

@@ -55,7 +55,8 @@ The `request_refund()` function requires a type-safe `RefundReasonCode` enum var
 - `file_appeal()` — Customer files an appeal against a rejected refund.
 - `resolve_appeal()` — Admin resolves an appeal (uphold or deny).
 - `get_appeal()` — Retrieves an appeal by its ID.
-- `get_appeals_by_customer()` — Returns all appeals filed by a specific customer.
+- `get_appeals_by_customer(customer, limit, offset)` — Returns a page of appeals filed by a customer (max 100 per page).
+- `get_appeal_count_by_customer()` — Total number of appeals filed by a customer.
 
 ### Auto-Refund Triggers
 
@@ -137,7 +138,7 @@ The `request_refund()` function requires a type-safe `RefundReasonCode` enum var
 - `get_refund_count_by_status()` — Gets the count of refunds in a given status.
 - `get_merchant_refunds()` — Paginated refunds for a specific merchant.
 - `get_merchant_refunds_by_status()` — Paginated refunds for a merchant filtered by status.
-- `get_merchant_pending_refunds()` — All pending refunds for a merchant.
+- `get_merchant_pending_refunds()` — Paginated pending refunds for a merchant (max 100 per page).
 - `get_merchant_refund_summary()` — Aggregate refund stats for a merchant.
 - `get_refunds_by_reason_code()` — Paginated refunds filtered by canonical reason code.
 - `get_reason_code_analytics(window_start, window_end)` — Counts refunds by reason code within the given ledger-timestamp window, sorted by frequency. Cached per window and invalidated only when a refund inside that window is processed.
@@ -252,7 +253,7 @@ read-only helper returning `true` only while tripped and still within cooldown.
 
 ### Customer History
 
-- `get_customer_refund_history()` — Paginated refund history for a customer.
+- `get_customer_refund_history(customer, limit, offset)` — Paginated refund history for a customer, newest first (max 100 per page).
 - `get_customer_refund_count_public()` — Total count of refunds for a customer.
 - `get_customer_refund_summary()` — Summary stats for a customer's refunds.
 
@@ -359,7 +360,8 @@ to request again.
 - `issue_refund_voucher()` — Admin issues a refund credit voucher for an approved refund.
 - `redeem_refund_voucher()` — Customer redeems a refund voucher against a future payment.
 - `get_voucher()` — Gets a refund voucher by ID.
-- `get_customer_vouchers()` — Gets all refund vouchers issued to a customer.
+- `get_customer_vouchers(customer, limit, offset)` — Gets a page of refund vouchers issued to a customer (max 100 per page).
+- `get_customer_voucher_count()` — Total number of vouchers issued to a customer.
 
 #### Voucher expiry and value handling
 

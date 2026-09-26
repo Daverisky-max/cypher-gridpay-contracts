@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Paginated Customer History & Appeal Queries (Breaking, Issue #87)** — Per-customer and per-merchant lists are no longer returned as a single unbounded vector. Every query now takes `(limit, offset)` and every page size is capped at `MAX_QUERY_PAGE_SIZE` (100) so a result set can never exceed Soroban's 64KB ledger entry limit. Records remain stored individually under keyed indices (`SystemKey::AppealByCustomer(customer, index)`, `VoucherKey::CustomerVoucher(customer, index)`, `Merchant(PendingSettlementIndex(merchant, index))`, `State(PartialPaymentRecord(payment_id, installment))`).
+  - **Refund contract:** `get_appeals_by_customer(customer)`, `get_customer_vouchers(customer)` and `get_merchant_pending_refunds(merchant)` now require `limit` and `offset`. New counters `get_appeal_count_by_customer()` and `get_customer_voucher_count()` let callers page through the full history.
+  - **Payment contract:** `get_pending_settlements(merchant)` and `get_installment_history(payment_id)` now require `limit` and `offset`. New counters `get_pending_settlement_count(merchant)` and `get_installment_count(payment_id)`.
+  - **Clamping (all contracts):** `get_payments_by_customer`, `get_payments_by_merchant`, `get_customer_refund_history`, `get_merchant_refunds`, `get_merchant_refunds_by_status`, `get_refunds_by_status` and `get_merchant_pending_refunds` silently clamp an oversized `limit` to 100 instead of returning an unbounded result.
+  - **Migration path:** replace `f(actor)` with a paging loop, e.g. `let mut offset = 0; loop { let page = f(actor, &100, &offset); if page.is_empty() { break; } offset += page.len() as u64; }`, using the matching `*_count` getter as the total.
+
 - **Refund Reason Code Migration (Breaking)** — The `request_refund()` function signature has changed to require a canonical `RefundReasonCode` enum variant in addition to free-text reason.
   - **Old signature:** `request_refund(..., reason: String, payment_created_at: u64)`
   - **New signature:** `request_refund(..., reason: String, reason_code: RefundReasonCode, payment_created_at: u64)`

@@ -4725,14 +4725,23 @@ impl PaymentContract {
         Ok(())
     }
 
-    /// Returns the full installment payment history for a given payment.
+    /// Returns a paginated list of the full installment payment history for a
+    /// given payment.
     ///
     /// # Arguments
     /// * `payment_id` - The ID of the payment to retrieve installment history for
+    /// * `limit` - Maximum number of installments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
+    /// * `offset` - Number of installments to skip for pagination
     ///
     /// # Returns
-    /// A `Vec<PartialPaymentRecord>` of all installments made toward the payment.
-    pub fn get_installment_history(env: Env, payment_id: u64) -> Vec<PartialPaymentRecord> {
+    /// A `Vec<PartialPaymentRecord>` with at most `limit` installment records.
+    pub fn get_installment_history(
+        env: Env,
+        payment_id: u64,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<PartialPaymentRecord> {
         let installment_counter: u32 = env
             .storage()
             .instance()
@@ -4742,18 +4751,47 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut history = Vec::new(&env);
-        for i in 1..=installment_counter {
+        if limit == 0 {
+            return history;
+        }
+
+        let total: u64 = installment_counter as u64;
+        let mut collected = 0u64;
+        let mut skipped = 0u64;
+        let mut index = total;
+        // Newest-first, mirroring the other history queries.
+        while index > 0 && collected < Self::clamp_page_size(limit) {
+            index -= 1;
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
             if let Some(record) =
                 env.storage()
                     .instance()
                     .get(&DataKey::State(StateDataKey::PartialPaymentRecord(
-                        payment_id, i,
+                        payment_id,
+                        (index + 1) as u32,
                     )))
             {
                 history.push_back(record);
+                collected += 1;
             }
         }
         history
+    }
+
+    /// Returns the number of installments recorded for a payment.
+    ///
+    /// Use this with [`Self::get_installment_history`] to page through the full
+    /// list.
+    pub fn get_installment_count(env: Env, payment_id: u64) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::PartialPaymentCounter(
+                payment_id,
+            )))
+            .unwrap_or(0)
     }
 
     /// Returns the outstanding balance remaining on a payment.
@@ -5204,9 +5242,15 @@ impl PaymentContract {
 
     /// Returns a paginated list of payments made by a customer.
     ///
+    /// Payment ids are stored individually under
+    /// `Customer(Payments(customer, index))`, and the page size is capped at
+    /// `MAX_QUERY_PAGE_SIZE` (Issue #87) so a customer with a long payment
+    /// history can never produce a result set larger than a single ledger entry.
+    ///
     /// # Arguments
     /// * `customer` - The customer address to query
-    /// * `limit` - Maximum number of payments to return
+    /// * `limit` - Maximum number of payments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
     /// * `offset` - The number of payments to skip (for pagination)
     ///
     /// # Returns
@@ -5226,8 +5270,11 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut payments = Vec::new(&env);
+        // Issue #87: never build a result set larger than a single page.
         let start = offset;
-        let end = (offset + limit).min(total_count);
+        let end = offset
+            .saturating_add(PaymentContract::clamp_page_size(limit))
+            .min(total_count);
 
         for i in start..end {
             if let Some(payment_id) =
@@ -5267,9 +5314,15 @@ impl PaymentContract {
 
     /// Returns a paginated list of payments received by a merchant.
     ///
+    /// Payment ids are stored individually under
+    /// `Merchant(Payments(merchant, index))`, and the page size is capped at
+    /// `MAX_QUERY_PAGE_SIZE` (Issue #87) so a merchant with a long payment
+    /// history can never produce a result set larger than a single ledger entry.
+    ///
     /// # Arguments
     /// * `merchant` - The merchant address to query
-    /// * `limit` - Maximum number of payments to return
+    /// * `limit` - Maximum number of payments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
     /// * `offset` - The number of payments to skip (for pagination)
     ///
     /// # Returns
@@ -5289,8 +5342,11 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut payments = Vec::new(&env);
+        // Issue #87: never build a result set larger than a single page.
         let start = offset;
-        let end = (offset + limit).min(total_count);
+        let end = offset
+            .saturating_add(PaymentContract::clamp_page_size(limit))
+            .min(total_count);
 
         for i in start..end {
             if let Some(payment_id) =
@@ -12732,14 +12788,29 @@ impl PaymentContract {
         Ok(())
     }
 
-    /// Returns all pending (non-finalized) settlements for a merchant.
+    /// Returns a paginated list of pending (non-finalized) settlements for a merchant.
+    ///
+    /// Records are stored individually under
+    /// `Merchant(PendingSettlementIndex(merchant, index))` and read back in
+    /// pages, so a merchant with a long settlement backlog can never blow the
+    /// Soroban ledger entry limit of a single query result.
     ///
     /// # Arguments
     /// * `merchant` - The merchant address.
+    /// * `limit` - Maximum number of settlements to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of `PendingSettlement` records that have not yet been finalized.
-    pub fn get_pending_settlements(env: Env, merchant: Address) -> Vec<PendingSettlement> {
+    /// A vector of at most `limit` `PendingSettlement` records that have not
+    /// been finalized yet. An empty vector is returned when `limit` is `0` or
+    /// `offset` is beyond the end of the index.
+    pub fn get_pending_settlements(
+        env: Env,
+        merchant: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<PendingSettlement> {
         let count: u64 = env
             .storage()
             .instance()
@@ -12747,8 +12818,15 @@ impl PaymentContract {
                 merchant.clone(),
             )))
             .unwrap_or(0);
+
         let mut result = Vec::new(&env);
-        for i in 0..count {
+        if limit == 0 || offset >= count {
+            return result;
+        }
+
+        let end = core::cmp::min(count, offset.saturating_add(Self::clamp_page_size(limit)));
+        let mut i = offset;
+        while i < end {
             if let Some(payment_id) =
                 env.storage()
                     .instance()
@@ -12768,8 +12846,33 @@ impl PaymentContract {
                     }
                 }
             }
+            i += 1;
         }
         result
+    }
+
+    /// Returns the number of settlement index slots held by a merchant.
+    ///
+    /// Use this with [`Self::get_pending_settlements`] to page through the
+    /// full list.
+    pub fn get_pending_settlement_count(env: Env, merchant: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Merchant(MerchantDataKey::PendingSettlementCount(
+                merchant,
+            )))
+            .unwrap_or(0)
+    }
+
+    /// Maximum number of records a single paginated query may return (Issue #87).
+    ///
+    /// Requesting more than this is silently clamped so a caller can never ask
+    /// for a result set that would exceed Soroban's ledger entry size limit.
+    const MAX_QUERY_PAGE_SIZE: u64 = 100;
+
+    /// Clamps a caller supplied page size to `MAX_QUERY_PAGE_SIZE`.
+    fn clamp_page_size(limit: u64) -> u64 {
+        core::cmp::min(limit, Self::MAX_QUERY_PAGE_SIZE)
     }
 
     // ── Issue #127: Dunning automation aliases ────────────────────────────
@@ -13237,3 +13340,6 @@ mod schema_version_test;
 
 #[cfg(test)]
 mod test_schema_migration;
+
+#[cfg(test)]
+mod test_paginated_queries;

@@ -188,7 +188,7 @@ fn test_get_merchant_pending_refunds_returns_only_requested() {
     client.approve_refund(&admin, &processed_one);
     client.process_refund(&admin, &processed_one);
 
-    let pending = client.get_merchant_pending_refunds(&merchant_a);
+    let pending = client.get_merchant_pending_refunds(&merchant_a, &10, &0);
     assert_eq!(pending.len(), 2);
     assert_eq!(pending.get(0).unwrap().id, pending_one);
     assert_eq!(pending.get(0).unwrap().status, RefundStatus::Requested);
