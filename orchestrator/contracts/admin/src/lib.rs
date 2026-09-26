@@ -46,6 +46,29 @@ pub struct PendingRotation {
 /// detect and react to a malicious or mistaken proposal.
 pub const CONTRACT_ROTATION_TIMELOCK: u64 = 48 * 60 * 60;
 
+/// Unified health report for the payment, escrow, and refund contracts
+/// (Issue #80).
+///
+/// Returned by [`AdminContract::get_system_status`] so frontends and monitoring
+/// systems can check the operational status of every core contract in a single
+/// RPC query.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct SystemStatus {
+    /// Whether the payment contract is globally paused.
+    pub payment_paused: bool,
+    /// Storage schema version reported by the payment contract.
+    pub payment_schema_version: u32,
+    /// Whether the escrow contract is globally paused.
+    pub escrow_paused: bool,
+    /// Storage schema version reported by the escrow contract.
+    pub escrow_schema_version: u32,
+    /// Whether the refund contract is globally paused.
+    pub refund_paused: bool,
+    /// Storage schema version reported by the refund contract.
+    pub refund_schema_version: u32,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractTargetUpdated {
@@ -434,6 +457,53 @@ impl AdminContract {
         env.storage().instance().get(&pending_key)
     }
 
+    /// Returns a unified health report for the payment, escrow, and refund
+    /// contracts (Issue #80).
+    ///
+    /// Queries the pause status and storage schema version of each core
+    /// contract in a single call, so frontends and monitoring systems can
+    /// check the operational status of the whole platform with one RPC query.
+    ///
+    /// # Parameters
+    /// - `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A [`SystemStatus`] with the pause flag and schema version of each
+    /// core contract.
+    ///
+    /// # Panics
+    /// Panics if the admin contract has not been initialized.
+    pub fn get_system_status(env: Env) -> SystemStatus {
+        let payment_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContract)
+            .unwrap_or_else(|| panic!("admin contract not initialized"));
+        let escrow_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .unwrap_or_else(|| panic!("admin contract not initialized"));
+        let refund_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundContract)
+            .unwrap_or_else(|| panic!("admin contract not initialized"));
+
+        let payment = PaymentContractClient::new(&env, &payment_contract);
+        let escrow = EscrowContractClient::new(&env, &escrow_contract);
+        let refund = RefundContractClient::new(&env, &refund_contract);
+
+        SystemStatus {
+            payment_paused: payment.get_pause_state().globally_paused,
+            payment_schema_version: payment.get_schema_version(),
+            escrow_paused: escrow.get_pause_state().globally_paused,
+            escrow_schema_version: escrow.get_schema_version(),
+            refund_paused: refund.get_pause_state().globally_paused,
+            refund_schema_version: refund.get_schema_version(),
+        }
+    }
+
     /// Maps a contract target to its pending-rotation storage key.
     fn target_key(target: &ContractTarget) -> DataKey {
         match target {
@@ -542,6 +612,60 @@ mod test {
         let client = RefundContractClient::new(env, &contract_id);
         client.initialize(admin);
         contract_id
+    }
+
+    #[test]
+    fn test_get_system_status() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin_contract_id = env.register(AdminContract, ());
+        let client = AdminContractClient::new(&env, &admin_contract_id);
+
+        let admin = Address::generate(&env);
+        let pauser = Address::generate(&env);
+        let payment_contract = setup_payment(&env, &pauser);
+        let escrow_contract = setup_escrow(&env, &pauser);
+        let refund_contract = setup_refund(&env, &pauser);
+
+        client.initialize(
+            &admin,
+            &pauser,
+            &payment_contract,
+            &escrow_contract,
+            &refund_contract,
+        );
+
+        // Freshly initialized: nothing paused, every contract at schema version 1.
+        let status = client.get_system_status();
+        assert!(!status.payment_paused);
+        assert_eq!(status.payment_schema_version, 1);
+        assert!(!status.escrow_paused);
+        assert_eq!(status.escrow_schema_version, 1);
+        assert!(!status.refund_paused);
+        assert_eq!(status.refund_schema_version, 1);
+
+        // Pause the payment contract and advance the refund schema version.
+        let reason = String::from_str(&env, "status check");
+        let payment = PaymentContractClient::new(&env, &payment_contract);
+        payment.pause_contract(&pauser, &reason);
+
+        let refund = RefundContractClient::new(&env, &refund_contract);
+        refund.migrate_schema(&pauser, &2);
+
+        // The unified report reflects both changes in a single query.
+        let status = client.get_system_status();
+        assert!(status.payment_paused);
+        assert_eq!(status.payment_schema_version, 1);
+        assert!(!status.escrow_paused);
+        assert_eq!(status.escrow_schema_version, 1);
+        assert!(!status.refund_paused);
+        assert_eq!(status.refund_schema_version, 2);
+
+        // Unpausing clears the flag in the report.
+        payment.unpause_contract(&pauser);
+        let status = client.get_system_status();
+        assert!(!status.payment_paused);
     }
 
     #[test]
