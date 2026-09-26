@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Schema Migration Invariant Checks (Issue #88)** — `migrate_schema()` in the payment and refund contracts now executes every registered data transformation *before* writing `target_version` to storage. A single unmigratable entry (unreadable record or id/key mismatch) aborts the call with `SchemaMigrationFailed` (`BasicError::SchemaMigrationFailed` / `ExtError::SchemaMigrationFailed`), reverting every write made by the migration so a version can never be bumped on top of partially migrated state. New suites: `core/contracts/payment/src/test_schema_migration.rs` and `core/contracts/refund/src/test_schema_migration.rs`.
+
 - **Payment Contract Events Documentation** — Comprehensive event reference for all 50+ Soroban events emitted by the payment contract, including core payments, subscriptions, channels, fees, governance, and control events. Off-chain integrators can now use this table to subscribe to events via Horizon.
 
 - **Refund Contract Events Documentation** — Comprehensive event reference for all 20+ Soroban events emitted by the refund contract, including refund lifecycle, appeals, arbitration, and stake management events. Enables off-chain monitoring of refund status changes and arbitration outcomes.

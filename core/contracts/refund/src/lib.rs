@@ -308,6 +308,9 @@ pub enum ExtError {
     // Issue #389: two-step admin rotation errors
     NoPendingAdmin = 59,
     NotPendingAdmin = 60,
+    // Issue #88: a data migration step failed, so the schema version must not
+    // be bumped (the whole transaction is reverted).
+    SchemaMigrationFailed = 61,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1411,6 +1414,13 @@ impl RefundContract {
 
     /// Migrate the contract schema to a new version.
     ///
+    /// Every data transformation registered for the versions between the
+    /// current schema version and `target_version` is executed **before**
+    /// `target_version` is written to storage. If a single refund record cannot
+    /// be migrated the call returns `Error::Ext(ExtError::SchemaMigrationFailed)`
+    /// and the whole transaction is reverted, so the stored version can never be
+    /// bumped on top of partially migrated (or corrupted) state.
+    ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized and match stored admin).
     /// * `target_version` - The target schema version to migrate to.
@@ -1418,6 +1428,8 @@ impl RefundContract {
     /// # Errors
     /// Returns `Unauthorized` if the caller is not the admin.
     /// Returns `SchemaAlreadyAtTarget` if the current version is already at or past the target.
+    /// Returns `SchemaMigrationFailed` if a data migration step failed, leaving the
+    /// stored version untouched.
     pub fn migrate_schema(env: Env, admin: Address, target_version: u32) -> Result<(), Error> {
         admin.require_auth();
         let stored_admin: Address = env
@@ -1434,10 +1446,126 @@ impl RefundContract {
             return Err(Error::Ext(ExtError::SchemaAlreadyAtTarget));
         }
 
+        // Issue #88: run every data migration first. `target_version` is only
+        // persisted once all transformations have completed successfully.
+        Self::run_data_migrations(&env, current, target_version)?;
+
         env.storage()
             .instance()
             .set(&SystemKey::SchemaVersion, &target_version);
         Ok(())
+    }
+
+    /// Runs the data transformations registered for every schema version step
+    /// between `from_version` (exclusive) and `to_version` (inclusive).
+    ///
+    /// # Arguments
+    /// * `from_version` - The currently stored schema version.
+    /// * `to_version` - The requested schema version.
+    ///
+    /// # Errors
+    /// Returns `SchemaMigrationFailed` if any stored entry could not be
+    /// transformed, in which case the caller reverts every write made so far.
+    fn run_data_migrations(env: &Env, from_version: u32, to_version: u32) -> Result<(), Error> {
+        let mut version = from_version;
+        while version < to_version {
+            let next_version = version + 1;
+            // v2: every stored refund must be reachable through the status index
+            // and the customer's history index, and rejected refunds must carry
+            // their rejection timestamp. Versions without a registered data
+            // transformation are no-ops.
+            if next_version == 2 {
+                Self::migrate_v1_to_v2(env)?;
+            }
+            version = next_version;
+        }
+        Ok(())
+    }
+
+    /// v1 -> v2 data migration: backfills the per-status index, the customer
+    /// history index and the rejection bookkeeping of stored refunds.
+    ///
+    /// # Errors
+    /// Returns `SchemaMigrationFailed` if a refund referenced by the refund
+    /// counter cannot be read, or if its id does not match the indexed record.
+    fn migrate_v1_to_v2(env: &Env) -> Result<(), Error> {
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundCounter)
+            .unwrap_or(0);
+
+        for refund_id in 1..=counter {
+            let refund: Refund = env
+                .storage()
+                .instance()
+                .get(&DataKey::Refund(refund_id))
+                .ok_or(Error::Ext(ExtError::SchemaMigrationFailed))?;
+
+            // Corrupted record: the id and the stored record must agree.
+            if refund.id != refund_id {
+                return Err(Error::Ext(ExtError::SchemaMigrationFailed));
+            }
+
+            // Status index membership (RefundsByStatus / RefundStatusIndex).
+            if !env
+                .storage()
+                .instance()
+                .has(&DataKey::RefundStatusIndex(refund_id))
+            {
+                Self::add_to_status_index(env, refund.status.clone(), refund_id);
+            }
+
+            // Rejection bookkeeping used by the appeal window checks.
+            if refund.status == RefundStatus::Rejected
+                && !env
+                    .storage()
+                    .instance()
+                    .has(&SystemKey::RefundRejectedAt(refund_id))
+            {
+                let rejected_at = refund.rejected_at.unwrap_or(refund.requested_at);
+                env.storage()
+                    .instance()
+                    .set(&SystemKey::RefundRejectedAt(refund_id), &rejected_at);
+            }
+
+            // Per-customer history index.
+            Self::index_refund_for_customer(env, &refund.customer, refund_id);
+        }
+
+        Ok(())
+    }
+
+    /// Appends `refund_id` to the customer's refund history when missing.
+    ///
+    /// Honours the hot/archive split so the migration never inflates instance
+    /// storage beyond `CUSTOMER_HISTORY_HOT_CAP` entries.
+    fn index_refund_for_customer(env: &Env, customer: &Address, refund_id: u64) {
+        let count = Self::get_customer_refund_count(env, customer);
+        if Self::customer_history_contains(env, customer, count, refund_id) {
+            return;
+        }
+        Self::append_customer_refund_history(env, customer, refund_id);
+    }
+
+    /// Returns `true` when `refund_id` is present in the customer's history
+    /// index, looking into the archive for entries that aged out of hot storage.
+    fn customer_history_contains(
+        env: &Env,
+        customer: &Address,
+        count: u64,
+        refund_id: u64,
+    ) -> bool {
+        if count == 0 {
+            return false;
+        }
+        // Healthy histories are append-only, so the newest slot is checked first.
+        for index in (0..count).rev() {
+            if Self::get_customer_refund_id_at(env, customer, index) == Some(refund_id) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Propose a new admin, starting a two-step rotation (Issue #389).
@@ -9046,6 +9174,9 @@ mod test_voucher_expiry;
 
 #[cfg(test)]
 mod schema_version_test;
+
+#[cfg(test)]
+mod test_schema_migration;
 
 #[cfg(test)]
 mod test_merchant_override_and_error_codes;
