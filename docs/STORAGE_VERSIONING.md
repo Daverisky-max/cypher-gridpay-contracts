@@ -1,12 +1,12 @@
 # Storage Schema Versioning
 
-Cypher GridPay Soroban smart contracts (`core/contracts/payment`, `core/contracts/refund`, `core/contracts/escrow`) implement an explicit storage schema versioning convention. This allows deployed contracts to track their data storage layout version on-chain and perform state migrations as stored data structures evolve over time.
+Cypher GridPay Soroban smart contracts (`core/contracts/payment`, `core/contracts/refund`, `core/contracts/escrow`) and the orchestrator contracts (`orchestrator/contracts/admin`) implement an explicit storage schema versioning convention. This allows deployed contracts to track their data storage layout version on-chain and perform state migrations as stored data structures evolve over time.
 
 ---
 
 ## 📐 How Storage Schema Versions Are Tracked
 
-Every contract tracks its schema version in instance storage under a dedicated storage key (`ConfigKey::SchemaVersion` or `SystemKey::SchemaVersion`).
+Every contract tracks its schema version in instance storage under a dedicated storage key (`ConfigKey::SchemaVersion`, `SystemKey::SchemaVersion` or `DataKey::SchemaVersion`).
 
 ### Key Functions
 
@@ -29,6 +29,7 @@ Every contract tracks its schema version in instance storage under a dedicated s
 |---|---|---|
 | `core/contracts/payment` | v1 → v2 | Re-indexes every payment in `1..=PaymentKey::Counter` into the customer index, the merchant index and the paged merchant index. |
 | `core/contracts/refund` | v1 → v2 | Re-indexes every refund in `1..=RefundCounter` into the per-status index and the customer history index, and backfills `SystemKey::RefundRejectedAt` for rejected refunds. |
+| `orchestrator/contracts/admin` | v1 → v2 | Re-validates the stored orchestrator configuration: the pauser and every child contract address must be present and the three child contracts must be distinct, otherwise an emergency pause could leave a role unmanaged. |
 
 If a single entry cannot be read, or its stored id disagrees with the key it is stored under, the migration aborts with `SchemaMigrationFailed` and **the whole transaction is reverted**:
 
@@ -76,6 +77,7 @@ The repository includes explicit tests demonstrating schema version initializati
 
 - **Payment Contract**: [`core/contracts/payment/src/schema_version_test.rs`](../core/contracts/payment/src/schema_version_test.rs)
 - **Refund Contract**: [`core/contracts/refund/src/schema_version_test.rs`](../core/contracts/refund/src/schema_version_test.rs)
+- **Orchestrator Admin Contract**: [`orchestrator/contracts/admin/src/schema_version_test.rs`](../orchestrator/contracts/admin/src/schema_version_test.rs)
 - **Migration invariant / rollback suites**: [`core/contracts/payment/src/test_schema_migration.rs`](../core/contracts/payment/src/test_schema_migration.rs) and [`core/contracts/refund/src/test_schema_migration.rs`](../core/contracts/refund/src/test_schema_migration.rs)
 
 ### Example Test Pattern

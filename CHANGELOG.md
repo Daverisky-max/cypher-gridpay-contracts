@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Orchestrator Schema Versioning (Issue #74)** — The orchestrator `admin` contract now implements the `get_schema_version()` / `migrate_schema()` convention documented in [`docs/STORAGE_VERSIONING.md`](docs/STORAGE_VERSIONING.md), completing the convention across every contract in the repository. `initialize()` writes `INITIAL_SCHEMA_VERSION` (1), `migrate_schema()` is admin-only and runs the registered v1 → v2 data transformation before persisting `target_version`, and it returns `SchemaAlreadyAtTarget` when the stored version is already at or past the target. New suite: `orchestrator/contracts/admin/src/schema_version_test.rs`.
+
 - **Schema Migration Invariant Checks (Issue #88)** — `migrate_schema()` in the payment and refund contracts now executes every registered data transformation *before* writing `target_version` to storage. A single unmigratable entry (unreadable record or id/key mismatch) aborts the call with `SchemaMigrationFailed` (`BasicError::SchemaMigrationFailed` / `ExtError::SchemaMigrationFailed`), reverting every write made by the migration so a version can never be bumped on top of partially migrated state. New suites: `core/contracts/payment/src/test_schema_migration.rs` and `core/contracts/refund/src/test_schema_migration.rs`.
 
 - **Payment Contract Events Documentation** — Comprehensive event reference for all 50+ Soroban events emitted by the payment contract, including core payments, subscriptions, channels, fees, governance, and control events. Off-chain integrators can now use this table to subscribe to events via Horizon.

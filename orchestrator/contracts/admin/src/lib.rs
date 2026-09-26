@@ -10,6 +10,11 @@ pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized = 2,
     Unauthorized = 3,
+    // The stored schema version is already at or past the requested target.
+    SchemaAlreadyAtTarget = 4,
+    // A data migration step failed, so the schema version must not be bumped
+    // (the whole transaction is reverted).
+    SchemaMigrationFailed = 5,
 }
 
 #[contracttype]
@@ -19,7 +24,11 @@ pub enum DataKey {
     PaymentContract,
     EscrowContract,
     RefundContract,
+    SchemaVersion,
 }
+
+/// Schema version written by `initialize`.
+const INITIAL_SCHEMA_VERSION: u32 = 1;
 
 #[contract]
 pub struct AdminContract;
@@ -65,6 +74,117 @@ impl AdminContract {
         env.storage()
             .instance()
             .set(&DataKey::RefundContract, &refund_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &INITIAL_SCHEMA_VERSION);
+
+        Ok(())
+    }
+
+    /// Returns the current schema version of the contract storage.
+    ///
+    /// # Returns
+    /// The stored schema version, or `1` (`INITIAL_SCHEMA_VERSION`) when the
+    /// contract was initialized before schema versioning was introduced.
+    pub fn get_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SchemaVersion)
+            .unwrap_or(INITIAL_SCHEMA_VERSION)
+    }
+
+    /// Migrates the contract storage schema to a target version.
+    ///
+    /// Every data transformation registered for the versions between the
+    /// current schema version and `target_version` is executed *before*
+    /// `target_version` is written to storage, so the version can never be
+    /// bumped on top of partially migrated state. If a single entry cannot be
+    /// migrated the call returns `Error::SchemaMigrationFailed` and the whole
+    /// transaction is reverted.
+    ///
+    /// # Parameters
+    /// - `admin`: the admin authorizing the migration (must be the stored admin).
+    /// - `target_version`: the schema version to migrate to.
+    ///
+    /// # Errors
+    /// Returns `Error::NotInitialized` before `initialize`, `Error::Unauthorized`
+    /// if the caller is not the stored admin, `Error::SchemaAlreadyAtTarget` when
+    /// the stored version is already at or past the target, and
+    /// `Error::SchemaMigrationFailed` if a data migration step failed.
+    pub fn migrate_schema(env: Env, admin: Address, target_version: u32) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let current = Self::get_schema_version(env.clone());
+        if current >= target_version {
+            return Err(Error::SchemaAlreadyAtTarget);
+        }
+
+        // Run every data migration first; `target_version` is only persisted
+        // once all transformations have completed successfully.
+        Self::run_data_migrations(&env, current, target_version)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &target_version);
+        Ok(())
+    }
+
+    /// Runs the data transformations registered for every schema version step
+    /// between `from_version` (exclusive) and `to_version` (inclusive).
+    fn run_data_migrations(env: &Env, from_version: u32, to_version: u32) -> Result<(), Error> {
+        let mut version = from_version;
+        while version < to_version {
+            let next_version = version + 1;
+            // v2: the orchestrator configuration must stay complete and
+            // resolvable, because every privileged entry point reads it.
+            if next_version == 2 {
+                Self::migrate_v1_to_v2(env)?;
+            }
+            version = next_version;
+        }
+        Ok(())
+    }
+
+    /// v1 -> v2 data migration: re-validates the stored orchestrator
+    /// configuration. Every privileged function resolves the admin, pauser and
+    /// child contract addresses from instance storage, so a missing entry or a
+    /// duplicated child contract must abort the migration instead of silently
+    /// bumping the version.
+    fn migrate_v1_to_v2(env: &Env) -> Result<(), Error> {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Pauser)
+            .ok_or(Error::SchemaMigrationFailed)?;
+        let payment: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContract)
+            .ok_or(Error::SchemaMigrationFailed)?;
+        let escrow: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .ok_or(Error::SchemaMigrationFailed)?;
+        let refund: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundContract)
+            .ok_or(Error::SchemaMigrationFailed)?;
+
+        // The three child contracts must be distinct, otherwise an emergency
+        // pause would hit the same contract twice and leave a role unmanaged.
+        if payment == escrow || payment == refund || escrow == refund {
+            return Err(Error::SchemaMigrationFailed);
+        }
 
         Ok(())
     }
@@ -317,3 +437,6 @@ mod test {
         client.emergency_unpause_all(&pauser);
     }
 }
+
+#[cfg(test)]
+mod schema_version_test;
