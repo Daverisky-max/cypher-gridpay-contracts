@@ -375,15 +375,23 @@ impl TryFromVal<Env, Val> for Error {
     }
 }
 
+/// Issue #72: dashboard-facing lifecycle events.
+///
+/// Every event carries the `customer`, `merchant`, `refund_id` and the
+/// canonical `reason_code` so customer and merchant dashboards can render
+/// refund requests, approvals, denials and appeals in real time without
+/// re-reading contract state.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundRequested {
+pub struct RefundRequestedEvent {
     pub refund_id: u64,
     pub payment_id: u64,
-    pub merchant: Address,
     pub customer: Address,
+    pub merchant: Address,
     pub amount: i128,
     pub token: Address,
+    pub reason_code: RefundReasonCode,
+    pub requested_at: u64,
 }
 
 #[contractevent]
@@ -414,18 +422,25 @@ pub struct TriggerRegistered {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundApproved {
+pub struct RefundApprovedEvent {
     pub refund_id: u64,
     pub payment_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
     pub amount: i128,
+    pub reason_code: RefundReasonCode,
     pub approved_by: Address,
     pub approved_at: u64,
 }
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundRejected {
+pub struct RefundDeniedEvent {
     pub refund_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub reason_code: RefundReasonCode,
     pub rejected_by: Address,
     pub rejected_at: u64,
     pub rejection_reason: String,
@@ -433,10 +448,14 @@ pub struct RefundRejected {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppealFiled {
+pub struct AppealFiledEvent {
     pub appeal_id: u64,
     pub refund_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
     pub appellant: Address,
+    pub reason_code: RefundReasonCode,
+    pub filed_at: u64,
 }
 
 #[contractevent]
@@ -1749,7 +1768,7 @@ impl RefundContract {
 
     /// Approve a pending refund request.
     ///
-    /// Changes the refund status from `Requested` to `Approved` and emits a `RefundApproved` event.
+    /// Changes the refund status from `Requested` to `Approved` and emits a `RefundApprovedEvent` event.
     ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized).
@@ -1770,7 +1789,7 @@ impl RefundContract {
     /// Reject a pending refund request.
     ///
     /// Moves the refund to `PendingAppeal` status with an appeal window, and emits a
-    /// `RefundRejected` event. The customer can file an appeal within the appeal window.
+    /// `RefundDeniedEvent` event. The customer can file an appeal within the appeal window.
     ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized).
@@ -1796,7 +1815,7 @@ impl RefundContract {
     /// Finalize a denied refund after its appeal window has expired.
     ///
     /// Moves the refund from `PendingAppeal` to `Rejected` status if the appeal window
-    /// has elapsed, and emits a `RefundRejected` event.
+    /// has elapsed, and emits a `RefundDeniedEvent` event.
     ///
     /// # Arguments
     /// * `refund_id` - The ID of the refund to finalize.
@@ -1842,8 +1861,12 @@ impl RefundContract {
             .clone()
             .unwrap_or(env.current_contract_address());
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by,
             rejected_at: now,
             rejection_reason: soroban_sdk::String::from_str(&env, "appeal window expired"),
@@ -1889,8 +1912,12 @@ impl RefundContract {
             .set(&DataKey::Refund(refund_id), &refund);
         Self::add_to_status_index(env, RefundStatus::PendingAppeal, refund_id);
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by: admin,
             rejected_at: now,
             rejection_reason,
@@ -1902,7 +1929,7 @@ impl RefundContract {
 
     /// File an appeal against a rejected or pending-appeal refund.
     ///
-    /// Creates a new appeal record and emits an `AppealFiled` event. The customer
+    /// Creates a new appeal record and emits an `AppealFiledEvent` event. The customer
     /// must be the refund's customer and the refund must be in a rejected/pending-appeal state.
     ///
     /// # Arguments
@@ -2010,10 +2037,14 @@ impl RefundContract {
             &(customer_count + 1),
         );
 
-        (AppealFiled {
+        (AppealFiledEvent {
             appeal_id,
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
             appellant: customer,
+            reason_code: refund.reason_code.clone(),
+            filed_at: env.ledger().timestamp(),
         })
         .publish(&env);
 
@@ -3095,10 +3126,13 @@ impl RefundContract {
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
 
-            (RefundApproved {
+            (RefundApprovedEvent {
                 refund_id: case.refund_id,
                 payment_id: refund.payment_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
                 amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 approved_by: env.current_contract_address(),
                 approved_at: env.ledger().timestamp(),
             })
@@ -3116,8 +3150,12 @@ impl RefundContract {
             Self::add_to_status_index(&env, RefundStatus::Rejected, refund.id);
             Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
 
-            (RefundRejected {
+            (RefundDeniedEvent {
                 refund_id: case.refund_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
+                amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 rejected_by: env.current_contract_address(),
                 rejected_at: refund.rejected_at.unwrap(),
                 rejection_reason: soroban_sdk::String::from_str(
@@ -3508,10 +3546,13 @@ impl RefundContract {
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
 
-            (RefundApproved {
+            (RefundApprovedEvent {
                 refund_id: case.refund_id,
                 payment_id: refund.payment_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
                 amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 approved_by: env.current_contract_address(),
                 approved_at: env.ledger().timestamp(),
             })
@@ -5835,7 +5876,7 @@ impl RefundContract {
             status: initial_status.clone(),
             requested_at: env.ledger().timestamp(),
             reason,
-            reason_code,
+            reason_code: reason_code.clone(),
             // Issue #147: Initialize lifecycle timestamps
             approved_at: if initial_status == RefundStatus::Approved {
                 Some(env.ledger().timestamp())
@@ -5891,13 +5932,15 @@ impl RefundContract {
         // Update payment refund usage for cap tracking
         Self::update_payment_refund_usage(&env, payment_id, amount);
 
-        (RefundRequested {
+        (RefundRequestedEvent {
             refund_id,
             payment_id,
-            merchant,
             customer: customer.clone(),
+            merchant: merchant.clone(),
             amount,
             token,
+            reason_code: refund.reason_code.clone(),
+            requested_at: refund.requested_at,
         })
         .publish(&env);
 
@@ -5945,10 +5988,13 @@ impl RefundContract {
             .set(&DataKey::Refund(refund_id), &refund);
         Self::add_to_status_index(env, RefundStatus::Approved, refund_id);
 
-        (RefundApproved {
+        (RefundApprovedEvent {
             refund_id,
             payment_id: refund.payment_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
             amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             approved_by,
             approved_at: env.ledger().timestamp(),
         })
@@ -8255,8 +8301,12 @@ impl RefundContract {
         Self::add_to_status_index(&env, RefundStatus::Rejected, refund_id);
         Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by: env.current_contract_address(),
             rejected_at: env.ledger().timestamp(),
             rejection_reason: soroban_sdk::String::from_str(&env, "TTL expired"),
@@ -9276,3 +9326,6 @@ mod test_merchant_override_and_error_codes;
 
 #[cfg(test)]
 mod test_admin_rotation;
+
+#[cfg(test)]
+mod test_refund_events;

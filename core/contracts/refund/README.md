@@ -475,9 +475,9 @@ The contract emits Soroban events for all state-changing operations. Off-chain i
 
 | Event             | Topic Name        | Payload Fields                                                             | Fires When                                                           |
 | ----------------- | ----------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `RefundRequested` | `RefundRequested` | `refund_id`, `payment_id`, `merchant`, `customer`, `amount`, `token`       | `request_refund()` creates refund in `Requested` status              |
-| `RefundApproved`  | `RefundApproved`  | `refund_id`, `payment_id`, `amount`, `approved_by`, `approved_at`          | `approve_refund()` moves refund to `Approved` status                 |
-| `RefundRejected`  | `RefundRejected`  | `refund_id`, `rejected_by`, `rejected_at`, `rejection_reason`              | `reject_refund()` moves refund to `PendingAppeal` status             |
+| `RefundRequestedEvent` | `refund_requested_event` | `refund_id`, `payment_id`, `customer`, `merchant`, `amount`, `token`, `reason_code`, `requested_at`       | `request_refund()` creates refund in `Requested` status              |
+| `RefundApprovedEvent`  | `refund_approved_event`  | `refund_id`, `payment_id`, `customer`, `merchant`, `amount`, `reason_code`, `approved_by`, `approved_at`          | `approve_refund()` moves refund to `Approved` status                 |
+| `RefundDeniedEvent`    | `refund_denied_event`    | `refund_id`, `customer`, `merchant`, `amount`, `reason_code`, `rejected_by`, `rejected_at`, `rejection_reason`              | `reject_refund()` moves refund to `PendingAppeal` status             |
 | `RefundProcessed` | `RefundProcessed` | `refund_id`, `processed_by`, `customer`, `amount`, `token`, `processed_at` | `process_refund()` executes approved refund and moves to `Processed` |
 
 ### Auto-Refund Trigger Events
@@ -491,7 +491,7 @@ The contract emits Soroban events for all state-changing operations. Off-chain i
 
 | Event            | Topic Name       | Payload Fields                        | Fires When                                                  |
 | ---------------- | ---------------- | ------------------------------------- | ----------------------------------------------------------- |
-| `AppealFiled`    | `AppealFiled`    | `appeal_id`, `refund_id`, `appellant` | `file_appeal()` customer files appeal against rejection     |
+| `AppealFiledEvent`    | `appeal_filed_event`    | `appeal_id`, `refund_id`, `customer`, `merchant`, `appellant`, `reason_code`, `filed_at` | `file_appeal()` customer files appeal against rejection     |
 | `AppealResolved` | `AppealResolved` | `appeal_id`, `upheld`, `resolved_at`  | `resolve_appeal()` admin resolves appeal (upheld or denied) |
 
 ### Arbitration Case Events
