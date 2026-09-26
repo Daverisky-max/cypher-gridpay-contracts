@@ -157,31 +157,9 @@ impl AdminContract {
     /// stored pauser.
     pub fn emergency_pause_all(env: Env, pauser: Address, reason: String) -> Result<(), Error> {
         pauser.require_auth();
-
-        let stored_pauser: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Pauser)
-            .ok_or(Error::NotInitialized)?;
-        if pauser != stored_pauser {
-            return Err(Error::Unauthorized);
-        }
-
-        let payment_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PaymentContract)
-            .ok_or(Error::NotInitialized)?;
-        let escrow_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::EscrowContract)
-            .ok_or(Error::NotInitialized)?;
-        let refund_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::RefundContract)
-            .ok_or(Error::NotInitialized)?;
+        Self::require_pauser(&env, &pauser)?;
+        let (payment_contract, escrow_contract, refund_contract) =
+            Self::get_contract_addresses(&env)?;
 
         PaymentContractClient::new(&env, &payment_contract).pause_contract(&pauser, &reason);
         EscrowContractClient::new(&env, &escrow_contract).pause_contract(&pauser, &reason);
@@ -204,31 +182,9 @@ impl AdminContract {
     /// stored pauser.
     pub fn emergency_unpause_all(env: Env, pauser: Address) -> Result<(), Error> {
         pauser.require_auth();
-
-        let stored_pauser: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Pauser)
-            .ok_or(Error::NotInitialized)?;
-        if pauser != stored_pauser {
-            return Err(Error::Unauthorized);
-        }
-
-        let payment_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PaymentContract)
-            .ok_or(Error::NotInitialized)?;
-        let escrow_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::EscrowContract)
-            .ok_or(Error::NotInitialized)?;
-        let refund_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::RefundContract)
-            .ok_or(Error::NotInitialized)?;
+        Self::require_pauser(&env, &pauser)?;
+        let (payment_contract, escrow_contract, refund_contract) =
+            Self::get_contract_addresses(&env)?;
 
         PaymentContractClient::new(&env, &payment_contract).unpause_contract(&pauser);
         EscrowContractClient::new(&env, &escrow_contract).unpause_contract(&pauser);
@@ -526,6 +482,41 @@ impl AdminContract {
         Ok(())
     }
 
+    /// Verifies the caller is the stored pauser.
+    fn require_pauser(env: &Env, pauser: &Address) -> Result<(), Error> {
+        let stored_pauser: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pauser)
+            .ok_or(Error::NotInitialized)?;
+        if *pauser != stored_pauser {
+            return Err(Error::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Reads the payment, escrow, and refund contract addresses from instance
+    /// storage in a single helper so dispatch functions don't duplicate the
+    /// reads and their error handling (Issue #81).
+    fn get_contract_addresses(env: &Env) -> Result<(Address, Address, Address), Error> {
+        let payment_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContract)
+            .ok_or(Error::NotInitialized)?;
+        let escrow_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .ok_or(Error::NotInitialized)?;
+        let refund_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundContract)
+            .ok_or(Error::NotInitialized)?;
+        Ok((payment_contract, escrow_contract, refund_contract))
+    }
+
     /// Stores a new pending rotation, rejecting duplicate proposals.
     fn propose_rotation(
         env: &Env,
@@ -666,6 +657,62 @@ mod test {
         payment.unpause_contract(&pauser);
         let status = client.get_system_status();
         assert!(!status.payment_paused);
+    }
+
+    #[test]
+    fn test_emergency_pause_all_gas_benchmark() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin_contract_id = env.register(AdminContract, ());
+        let client = AdminContractClient::new(&env, &admin_contract_id);
+
+        let admin = Address::generate(&env);
+        let pauser = Address::generate(&env);
+        let payment_contract = setup_payment(&env, &pauser);
+        let escrow_contract = setup_escrow(&env, &pauser);
+        let refund_contract = setup_refund(&env, &pauser);
+
+        client.initialize(
+            &admin,
+            &pauser,
+            &payment_contract,
+            &escrow_contract,
+            &refund_contract,
+        );
+
+        // Measure the CPU and memory cost of the multi-contract dispatch.
+        // The budget resets before every top-level invocation, so reading it
+        // after the call gives the cost of that invocation alone.
+        let reason = String::from_str(&env, "gas benchmark");
+        client.emergency_pause_all(&pauser, &reason);
+
+        let budget = env.cost_estimate().budget();
+        let cpu = budget.cpu_instruction_cost();
+        let mem = budget.memory_bytes_cost();
+
+        // The dispatch must stay well within the Soroban transaction CPU limit
+        // (1 billion instructions on current networks). This bound is generous
+        // enough to avoid flakism while still catching regressions that would
+        // blow the budget.
+        assert!(
+            cpu < 1_000_000_000,
+            "emergency_pause_all CPU {} exceeds transaction limit",
+            cpu
+        );
+        assert!(
+            mem < 40_000_000,
+            "emergency_pause_all memory {} exceeds transaction limit",
+            mem
+        );
+
+        // The pause actually took effect on all three contracts.
+        let payment = PaymentContractClient::new(&env, &payment_contract);
+        let escrow = EscrowContractClient::new(&env, &escrow_contract);
+        let refund = RefundContractClient::new(&env, &refund_contract);
+        assert!(payment.get_pause_state().globally_paused);
+        assert!(escrow.get_pause_state().globally_paused);
+        assert!(refund.get_pause_state().globally_paused);
     }
 
     #[test]
