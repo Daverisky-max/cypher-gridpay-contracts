@@ -11387,11 +11387,13 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::InvalidAmount));
         }
 
-        // Verify signature over (channel_id, merchant_amount, nonce)
+        // Issue #113: Verify signature over (channel_id, merchant_amount, nonce, contract_address)
+        // Including the contract address prevents cross-channel replay attacks.
         let mut msg = Bytes::new(&env);
         msg.append(&channel_id.to_xdr(&env));
         msg.append(&merchant_amount.to_xdr(&env));
         msg.append(&nonce.to_xdr(&env));
+        msg.append(&env.current_contract_address().to_xdr(&env));
 
         env.crypto()
             .ed25519_verify(&channel.customer_pk, &msg, &signature);
