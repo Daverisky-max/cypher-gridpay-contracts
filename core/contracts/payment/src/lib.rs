@@ -118,32 +118,59 @@ pub enum DataKey {
 #[repr(u32)]
 #[contracterror]
 pub enum BasicError {
+    /// Admin authentication required. The caller is not a registered admin.
     Unauthorized = 100,
+    /// Payment metadata exceeds the maximum allowed size.
     MetadataTooLarge = 101,
+    /// Payment notes exceed the maximum allowed size.
     NotesTooLarge = 102,
+    /// Unsupported currency specified. Use XLM, USDC, USDT, BTC, or ETH.
     InvalidCurrency = 103,
+    /// Batch size is invalid. Use a batch size between 1 and 100.
     InvalidBatchSize = 104,
+    /// Some payments in the batch failed. Check individual payment statuses.
     BatchPartialFailure = 105,
+    /// Rate limit exceeded for this address. Wait for the rate limit window to reset.
     RateLimitExceeded = 106,
+    /// Daily volume limit exceeded. Wait for the next day or contact admin.
     DailyVolumeExceeded = 107,
+    /// Address has been flagged for suspicious activity. Contact support to resolve.
     AddressFlagged = 108,
+    /// Address is already flagged. No action needed.
     AddressAlreadyFlagged = 109,
+    /// Payment amount exceeds the maximum allowed. Reduce payment amount.
     AmountExceedsLimit = 110,
+    /// Multi-signature not initialized. Initialize multi-sig configuration first.
     MultiSigNotInitialized = 111,
+    /// Not enough admin signatures. Collect the required number of admin signatures.
     InsufficientAdmins = 112,
+    /// Caller is not an admin. Use an admin account.
     NotAnAdmin = 113,
+    /// Admin has already approved this proposal. No action needed.
     AlreadyApproved = 114,
+    /// Price oracle call failed. Retry or check oracle configuration.
     OracleCallFailed = 115,
+    /// Contract is paused. Wait for the contract to be unpaused.
     ContractPaused = 116,
+    /// This function is paused. Use an alternative function.
     FunctionPaused = 117,
+    /// Tier threshold configuration is invalid. Fix tier threshold values.
     InvalidTierThresholds = 118,
+    /// Oracle price feed is stale. Wait for the next oracle update.
     OracleFeedStale = 119,
+    /// Oracle is not configured. Configure the oracle first.
     OracleNotConfigured = 120,
+    /// Payment amount is invalid. Use a positive amount.
     InvalidAmount = 121,
+    /// Verification level not found. Use a valid verification level.
     VerificationLevelNotFound = 122,
+    /// Tier limits are not configured. Configure tier limits first.
     TierLimitsNotConfigured = 123,
+    /// Invalid interval specified. Use a valid interval.
     InvalidInterval = 124,
+    /// Invalid basis points value. Use bps between 0 and 10000.
     InvalidBps = 125,
+    /// Schema is already at the target version. No migration needed.
     SchemaAlreadyAtTarget = 126,
 }
 
