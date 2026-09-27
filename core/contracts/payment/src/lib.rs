@@ -13058,3 +13058,12 @@ mod test_scheduled_payment;
 
 #[cfg(test)]
 mod schema_version_test;
+
+#[cfg(test)]
+mod test_fee_sweep_audit;
+
+#[cfg(test)]
+mod test_replay_prevention;
+
+#[cfg(test)]
+mod test_auth_rejection;
