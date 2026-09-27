@@ -18,6 +18,17 @@ jobs:
       - name: Install Stellar CLI
         run: curl -fsSL https://github.com/stellar/stellar-cli/raw/main/install.sh | sh -s -- --dir ~/.cargo/bin
 
+      - name: Ensure wasm32-unknown-unknown target is installed
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Verify wasm32-unknown-unknown compiles (core)
+        run: cargo check --workspace --target wasm32-unknown-unknown --release
+        working-directory: core
+
+      - name: Verify wasm32-unknown-unknown compiles (orchestrator)
+        run: cargo check --workspace --target wasm32-unknown-unknown --release
+        working-directory: orchestrator
+
       - name: Cache Cargo registry and build artifacts (core)
         uses: actions/cache@v3
         with:
@@ -42,13 +53,16 @@ jobs:
           git diff --exit-code
 
       - name: Clippy Lints (core)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: core
 
       - name: Clippy Lints (orchestrator)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: orchestrator
 
+      # `make build` runs `stellar contract build`, which emits the deployable
+      # wasm32v1-none artifact. The wasm32-unknown-unknown check above is a
+      # separate, additional guarantee and does not replace this step.
       - name: Build Contracts (core)
         run: make build
         working-directory: core
