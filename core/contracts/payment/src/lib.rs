@@ -178,30 +178,55 @@ pub enum BasicError {
 #[repr(u32)]
 #[contracterror]
 pub enum PaymentError {
+    /// Payment not found. Verify the payment ID.
     NotFound = 200,
+    /// Payment is not in a valid status for this operation.
     InvalidStatus = 201,
+    /// Payment has already been processed. No action needed.
     AlreadyProcessed = 202,
+    /// Payment has expired. Create a new payment.
     Expired = 203,
+    /// Payment has not expired yet. Wait for expiration.
     NotExpired = 204,
+    /// Payment has no expiration set.
     NoExpiration = 205,
+    /// Token transfer failed. Check token balance and allowances.
     TransferFailed = 206,
+    /// Refund amount exceeds the original payment amount.
     RefundExceedsPayment = 207,
+    /// Payment is not yet due. Wait for the scheduled time.
     NotYetDue = 208,
+    /// Scheduled payment has been cancelled.
     ScheduledPaymentCancelled = 209,
+    /// Metadata has already been set for this payment.
     MetadataAlreadySet = 210,
+    /// Metadata not found for this payment.
     MetadataNotFound = 211,
+    /// Hash mismatch. The provided hash does not match the stored hash.
     HashMismatch = 212,
+    /// Payment has already been fully paid.
     AlreadyFullyPaid = 213,
+    /// Installment amount exceeds the remaining balance.
     InstallmentExceedsRemaining = 214,
+    /// Partial payment not found. Verify the partial payment ID.
     PartialPaymentNotFound = 215,
+    /// Merchant rate limit exceeded. Wait for the rate limit window to reset.
     MerchantRateLimitExceeded = 216,
+    /// Amount rate limit exceeded. Reduce the payment amount.
     AmountRateLimitExceeded = 217,
+    /// Payout schedule not found. Configure a payout schedule first.
     PayoutScheduleNotFound = 218,
+    /// Payout is not yet due. Wait for the scheduled time.
     PayoutNotYetDue = 219,
+    /// Nothing to settle. The payment has no outstanding balance.
     NothingToSettle = 220,
+    /// Billing overflow. The billing amount exceeds the maximum allowed.
     BillingOverflow = 221,
+    /// Invalid line item. Check the line item data.
     InvalidLineItem = 222,
+    /// Invalid scheduled time. Use a future timestamp.
     InvalidScheduleTime = 223,
+    /// Token not allowed. Use an allowed token.
     TokenNotAllowed = 224,
 }
 
