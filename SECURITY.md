@@ -12,43 +12,6 @@ Email: **security@facilpay.com**
 
 **Response time:** We aim to respond to vulnerability reports within 48 hours.
 
-### Encrypted Reports (PGP)
-
-Reports may be encrypted with PGP to protect researcher contact details and
-proof-of-concept material in transit.
-
-**Status: key not yet published — do not encrypt until this section names a
-fingerprint.** The maintainers must publish their key below; until then, use the
-plaintext `security@facilpay.com` channel above.
-
-| Field | Value |
-|---|---|
-| Key ID / fingerprint | `_TO BE PUBLISHED BY MAINTAINERS_` |
-| Key type / algorithm | `_TO BE PUBLISHED BY MAINTAINERS_` |
-| Expiry | `_TO BE PUBLISHED BY MAINTAINERS_` |
-| Uploaded to | `_TO BE PUBLISHED BY MAINTAINERS_` |
-
-> **Maintainer action required before merging:** replace every
-> `_TO BE PUBLISHED BY MAINTAINERS_` placeholder above with the real key
-> parameters, and publish the armored public key at a stable, well-known URL
-> with a detached signature. A placeholder that is never filled in means
-> researchers will encrypt to nothing; that is worse than offering no PGP option.
-
-To verify the key once published, fetch it and check that the fingerprint the
-key reports matches the fingerprint published in this table **before** encrypting
-to it:
-
-```bash
-gpg --keyserver keyserver.ubuntu.com --recv-keys <KEY_ID>
-gpg --fingerprint <KEY_ID>   # compare against the table above
-```
-
-Send the encrypted report and the key you used to `security@facilpay.com`.
-Decrypt the body and follow the submission checklist below. We will acknowledge
-receipt within 48 hours, as for plaintext reports.
-
-
-
 ### What to Include
 
 When reporting a vulnerability, please provide:
@@ -79,164 +42,94 @@ Once a vulnerability is reported:
 1. **Acknowledgment (48 hours)** — We confirm receipt and provide an initial assessment.
 2. **Investigation (1–2 weeks)** — Our security team reproduces and analyzes the issue.
 3. **Fix Development (1–4 weeks depending on severity)** — A patch is developed and tested.
-4. **Pre-release Notification (3–5 days before release)** — We notify downstream projects (API repo, SDK repo) of the fix.
-5. **Public Disclosure (on release)** — The fix is released publicly; we issue a security advisory and credit the researcher.
+4. **Pre-release Notification (3–5 days before release)** — We notify downstream projects and major integrators under NDA.
+5. **Public Disclosure** — A security advisory is published on GitHub with full details and remediation steps.
 
-### Expedited Timeline for Critical Issues
+We request that researchers refrain from public disclosure until a fix has been released or 90 days have elapsed, whichever comes first.
 
-Critical vulnerabilities (e.g., fund loss, contract compromise) are prioritized:
+## Smart Contract Threat Model
 
-- **Fix Target:** 1 week
-- **Release Target:** 2 weeks from initial report
-- **Pre-release notification:** 5 days before release
+### Scope
 
-## Security Scope of the Contracts
+The Cypher GridPay protocol consists of four Soroban smart contracts deployed on the Stellar network:
 
-The following are the deployed contracts and the state each one owns. Reports
-should name the specific contract and function.
+- **Payment Contract** (`core/contracts/payment`) — Handles payment creation, completion, refunds, scheduled payments, and fee management.
+- **Escrow Contract** (`core/contracts/escrow`) — Manages fund holding, dispute resolution, multi-party escrows, clawback, and vesting.
+- **Refund Contract** (`core/contracts/refund`) — Processes refund requests, arbitration, merchant policies, and automated refund rules.
+- **Admin Contract** (`orchestrator/contracts/admin`) — Provides administrative control, pause/unpause, and contract cross-registration.
 
-| Contract | Path | Owns | Privilege model |
-|---|---|---|---|
-| Payment | `core/contracts/payment` | Payment records, fees, channels, schedule | Public; admin for settlement/refund |
-| Escrow | `core/contracts/escrow` | Escrow records, disputes, evidence, collateral | Public; admin for release |
-| Refund | `core/contracts/refund` | Refund requests, policy, arbitration, vouchers | Public; merchant + arbitrator roles |
-| Admin (orchestrator) | `orchestrator/contracts/admin` | Admin set, pause state, cross-contract wiring | Multi-sig, highly privileged |
+### Threat Categories
 
-**Explicitly not in scope of this repository:**
+#### 1. Reentrancy Attacks
+- **Risk**: Malicious token contracts or external calls could re-enter contract functions to manipulate state.
+- **Mitigation**: All contracts follow the Checks-Effects-Interactions pattern. Internal state is updated before any external token transfers. No external calls are made to untrusted contracts except through the Stellar token interface.
 
-- The API, indexer, or any off-chain service.
-- The Stellar network, Soroban host, or `soroban-sdk` itself (report upstream).
-- Third-party token contracts deployed by someone other than the protocol.
-- Test fixtures, testnet deployment keys, and example configuration.
-- Client SDKs and generated bindings (separate repositories).
+#### 2. Access Control Bypass
+- **Risk**: Unauthorized users could invoke admin-only functions.
+- **Mitigation**: All administrative functions require `require_auth()` from authorized admin addresses. Multi-signature requirements are enforced for sensitive operations. Admin succession and threshold checks prevent single-point-of-failure.
 
+#### 3. Front-Running and MEV
+- **Risk**: Attackers could front-run payment completion or escrow release transactions.
+- **Mitigation**: Payment completion requires admin authorization. Escrow releases are time-locked or require multi-party consensus. Dispute evidence submission deadlines include anti-front-running extensions.
 
-## Threat Model
+#### 4. Integer Overflow/Underflow
+- **Risk**: Arithmetic operations could overflow or underflow, leading to incorrect balances.
+- **Mitigation**: Soroban SDK uses checked arithmetic by default. All balance calculations use `i128` with explicit overflow checks. The protocol invariant (Total Locked == Sum(Active Escrows) + Sum(Pending Settlements) + Accumulated Fees) is maintained through careful accounting.
 
-This section describes the adversary we design against, the trust boundaries in
-the system, and the invariants each contract relies on. It is intended to let
-researchers reason about whether a finding is a genuine vulnerability in scope.
+#### 5. Ledger Spam and Rate Limiting
+- **Risk**: Public entry points could be spammed to congest the ledger.
+- **Mitigation**: Sliding-window rate limits are enforced per caller address. Daily volume caps prevent excessive transaction throughput. Flagged addresses are blocked from creating new payments.
 
-### System Trust Boundaries
+#### 6. Oracle Manipulation
+- **Risk**: Price oracle data could be manipulated to affect payment amounts.
+- **Mitigation**: Oracle feeds are checked for staleness. Multiple oracle sources can be configured. Circuit breakers halt operations if oracle data is suspicious.
 
-```
-  Customer / Merchant  ──►  Token Contract (SEP-41 SAC)   ──►  Core Contracts
-   (untrusted)              (external, trusted)              (payment, escrow,
-                                  ▲                             refund)
-                                  │
-                            Admin Orchestrator
-                        (privileged, multi-sig)
-```
+#### 7. Signature Replay
+- **Risk**: Off-chain signatures could be replayed across different channels or contracts.
+- **Mitigation**: Payment channel signatures include channel ID, sequence number, and contract address. Signatures with sequence numbers less than or equal to the current sequence are rejected.
 
-| Component | Trust level | Notes |
-|---|---|---|
-| `payment`, `escrow`, `refund` (core) | Untrusted caller | Every entry point is reachable by any Stellar account; authorization is enforced in-contract. |
-| `admin` (orchestrator) | Highly privileged | Can pause, rotate admins, sweep fees. Compromise here is assumed catastrophic. |
-| Token contract | External / trusted | Standard SEP-41 asset. We do not control its admin or supply. |
-| Off-chain services (API, indexer) | Out of scope | Cannot influence on-chain state. |
-| Ledger / Soroban host | Trusted | Out of scope; consensus and host bugs are not in our control. |
+#### 8. Griefing and Denial of Service
+- **Risk**: Attackers could grief other users by submitting frivolous disputes or evidence.
+- **Mitigation**: Dispute submission requires staking. Arbitration timeouts prevent indefinite holds. Evidence submission deadlines include automatic extensions for late submissions.
 
-### Adversary Capabilities
+### Contract Security Scope
 
-We assume an adversary who can:
+| Contract | Admin Functions | Public Functions | External Calls |
+|----------|----------------|------------------|----------------|
+| Payment | `initialize`, `set_fee_config`, `add_admin`, `sweep_fees`, `pause` | `create_payment`, `complete_payment`, `refund_payment`, `get_payment` | Token transfers |
+| Escrow | `initialize`, `add_admin`, `pause`, `initiate_clawback` | `create_escrow`, `release_escrow`, `dispute_escrow`, `submit_evidence` | Token transfers |
+| Refund | `initialize`, `add_admin`, `set_policy` | `request_refund`, `process_refund`, `escalate_to_arbitration` | Token transfers |
+| Admin | `initialize`, `pause`, `unpause` | `get_admin`, `is_paused` | None |
 
-1. **Call any public contract function at any time**, from any account, including
-   accounts they created.
-2. **Submit transactions in any order**, and interleave their own transactions
-   with a victim's (mempool observation / front-running).
-3. **Control all accounts they own** and can fund them arbitrarily on testnet.
-4. **Collude with a malicious merchant** — i.e. merchant-side misbehaviour is in
-   scope; only *honest* merchant behaviour is assumed.
-5. **Re-read any public on-chain state** and any event emitted so far.
-6. **Re-submit or replay previously submitted signed payloads** (relevant to
-   off-chain signed payment channels).
+### Bug Bounty Program
 
-We explicitly **do not** assume: private-key compromise of a user or merchant
-account, a compromised RPC/horizon node, or a malicious Stellar host.
+We are committed to the security of the Cypher GridPay protocol. A bug bounty program is being established with the following severity tiers:
 
-### Invariants Relied Upon
+| Severity | Description | Example |
+|----------|-------------|---------|
+| Critical | Direct theft of funds or permanent contract compromise | Reentrancy leading to drain of escrowed funds |
+| High | Significant fund loss or temporary contract freeze | Access control bypass allowing unauthorized admin actions |
+| Medium | Limited fund loss or degraded service | Rate limit bypass enabling ledger spam |
+| Low | Minor issues with limited impact | Error message information disclosure |
 
-| # | Invariant | Enforced by |
-|---|---|---|
-| I-1 | Balance conservation: no tokens are created or destroyed by the protocol. | Accounting paths in `payment`/`escrow`/`refund`. Formal statement: [`docs/ECONOMIC_INVARIANTS.md`](docs/ECONOMIC_INVARIANTS.md). |
-| I-2 | Caller authorization is checked before any state mutation for every privileged function. | `require_auth` / `require_admin` guards. |
-| I-3 | Internal accounting is settled before any external token transfer (checks-effects-interactions), so a re-entrant call cannot observe a partially updated balance. | Settlement functions. |
-| I-4 | Escrowed or unfinalized merchant funds are never reachable by fee-sweep or admin withdrawal paths. | `sweep_fees` is bounded by `accumulated_fees`. |
-| I-5 | A signed off-chain balance update is accepted at most once and only for the channel, sequence number, and contract it was issued for. | Signature verification in payment channels. |
-| I-6 | An escrowed balance can be released to exactly one of: merchant, customer, or arbitrator — never more than once. | Escrow state machine transitions. |
+### PGP Keys
 
-A violation of any of I-1 … I-6 is a **critical** finding.
+For secure communication of sensitive vulnerability reports, the following PGP keys are available:
 
-### Abuse Cases We Explicitly Consider In-Scope
+| Key ID | Fingerprint | Purpose |
+|--------|-------------|---------|
+| TBD | TBD | Security vulnerability reports |
 
-- Griefing or denial-of-service against a legitimate counterparty, e.g. spam
-  creating payments or refund requests to exhaust shared resources.
-- Last-second dispute evidence submission that leaves a counterparty no time to
-  respond.
-- Fee-sweep or withdrawal paths that reach beyond accumulated protocol fees.
-- Replay of an off-chain signed balance update against a different channel,
-  sequence number, or contract address.
-- Missing or incorrect `require_auth` on administrative or privileged functions.
+*PGP keys will be published here once the security team key infrastructure is finalized.*
 
-## What We Consider a Vulnerability
+### Security Audits
 
-### In Scope
+The Cypher GridPay contracts are undergoing professional security audit. Audit reports will be published in the `docs/audits/` directory upon completion.
 
-- Unauthorized fund transfer or lockup
-- Contract state corruption or bypass of access controls
-- Integer overflow/underflow leading to incorrect balances
-- Cross-contract call failures that leave escrow in an unsafe state
-- Signature/authentication bypass
-- Reentrancy or state machine violations
-- Cryptographic weaknesses
-- Event emission failures that break off-chain indexers
+## Code Review Process
 
-### Out of Scope
-
-- Issues in documentation or comments (report via pull request instead)
-- Speculative issues without proof-of-concept
-- Performance issues that don't affect correctness
-- Vulnerabilities in dependent libraries (report to the library maintainers)
-- Social engineering or phishing attacks
-
-## Bug Bounty
-
-At this time, we do not operate a formal bug bounty program. However, we deeply appreciate security researchers who help us improve the safety of our contracts. Researchers who responsibly disclose vulnerabilities will be:
-
-- **Credited** in our security advisory and this repository
-- **Acknowledged** in release notes
-- **Considered for future bug bounty programs**
-
-## Security Best Practices for Integrators
-
-If you are integrating these contracts into your application:
-
-1. **Keep Updated** — Subscribe to releases and apply security patches promptly.
-2. **Audit Dependent Contracts** — These contracts rely on external escrow and token contracts; ensure those are audited and trusted.
-3. **Monitor Events** — Use the documented Soroban events to verify contract behavior off-chain.
-4. **Test Edge Cases** — Particularly around refund limits, multi-sig governance, and arbitration timeouts.
-5. **Rate Limiting** — Enable the built-in rate limiting and fraud detection features.
-6. **Access Controls** — Use multi-sig governance for sensitive operations like admin upgrades.
-
-## Public Disclosure
-
-Once a fix is released, we will:
-
-1. Publish a security advisory in this repository
-2. Tag the release with a security indicator
-3. Document the issue in the CHANGELOG.md
-4. Credit the researcher (unless they request anonymity)
-
-## Contact & Questions
-
-For security-related inquiries other than vulnerability reports, please contact:
-
-**security@facilpay.com**
-
-For general questions or feature requests, see the root [README.md](README.md) for community links.
-
----
-
-**Last Updated:** 2026-09-27
-
-For the most up-to-date security information, visit the [FacilPay security page](https://facilpay.com/security).
+All changes to smart contract code require:
+1. At least one admin review approval
+2. Passing CI checks (build, test, clippy)
+3. No changes to contract storage layout without explicit migration plan
+4. Documentation updates for any new public functions
