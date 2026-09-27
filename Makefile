@@ -17,6 +17,18 @@ fmt:
 	$(MAKE) -C core fmt
 	$(MAKE) -C orchestrator fmt
 
+clippy:
+	$(MAKE) -C core clippy
+	$(MAKE) -C orchestrator clippy
+
+check:
+	$(MAKE) -C core check
+	$(MAKE) -C orchestrator check
+
+doc:
+	$(MAKE) -C core doc
+	$(MAKE) -C orchestrator doc
+
 clean:
 	$(MAKE) -C core clean
 	$(MAKE) -C orchestrator clean
