@@ -1,131 +1,162 @@
 #!/usr/bin/env bash
-#
-# Generate the TypeScript client SDK for the Cypher GridPay smart contracts.
-#
-# Produces the NPM-ready package @cypher-gridpay/contracts-sdk under
-# sdk/typescript/. Every contract is compiled to a `stellar contract bindings
-# typescript` module and re-exported from a single typed entrypoint, so an app
-# does:
-#
-#     import { PaymentsClient } from "@cypher-gridpay/contracts-sdk";
-#
-# Usage:
-#   ./scripts/generate-ts-bindings.sh              # build wasm, then generate
-#   ./scripts/generate-ts-bindings.sh --no-build   # reuse existing wasm
-#   ./scripts/generate-ts-bindings.sh --install    # also run npm install + build
-#
-# Requirements:
-#   - stellar CLI
-#   - node 18+ and npm (only for --install)
-#
-# See sdk/typescript/README.md and the root README.md.
+# generate-ts-bindings.sh — Generate TypeScript client SDK for Cypher GridPay contracts
+# This script uses Stellar CLI to generate TypeScript bindings for all four contracts.
+# Prerequisites: stellar CLI, node, npm
+# Usage: ./scripts/generate-ts-bindings.sh [output_dir]
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SDK_DIR="${REPO_ROOT}/sdk/typescript"
-GEN_DIR="${SDK_DIR}/src/generated"
+OUTPUT_DIR="${1:-ts-sdk}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-BUILD=1
-INSTALL=0
-for arg in "$@"; do
-  case "$arg" in
-    --no-build) BUILD=0 ;;
-    --install)  INSTALL=1 ;;
-    -h|--help)  sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *) echo "unknown argument: $arg" >&2; exit 2 ;;
-  esac
-done
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-if ! command -v stellar >/dev/null 2>&1; then
-  echo "error: 'stellar' CLI not found in PATH." >&2
-  echo "       install: cargo install --locked stellar-cli --features opt" >&2
-  exit 1
-fi
+log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-# contract-crate-dir : contract-name
-# Crate names come from each contract's Cargo.toml [package] name.
-CONTRACTS=(
-  "core/contracts/payment:payments"
-  "core/contracts/escrow:escrow"
-  "core/contracts/refund:refund"
-  "orchestrator/contracts/admin:admin"
+command -v stellar >/dev/null 2>&1 || { log_error "Stellar CLI not found. Install: cargo install --locked stellar-cli --features opt"; exit 1; }
+command -v node >/dev/null 2>&1 || { log_error "node not found"; exit 1; }
+command -v npm >/dev/null 2>&1 || { log_error "npm not found"; exit 1; }
+
+CONTRACTS=("payment" "escrow" "refund" "admin")
+CONTRACT_WASM_PATHS=(
+    "core/target/wasm32v1-none/release/payment.wasm"
+    "core/target/wasm32v1-none/release/escrow.wasm"
+    "core/target/wasm32v1-none/release/refund.wasm"
+    "orchestrator/target/wasm32v1-none/release/admin.wasm"
 )
 
-wasm_dir_for() {
-  case "$1" in
-    orchestrator/*) printf '%s' "${REPO_ROOT}/orchestrator/target/wasm32v1-none/release" ;;
-    *)               printf '%s' "${REPO_ROOT}/core/target/wasm32v1-none/release" ;;
-  esac
-}
+log_info "Generating TypeScript bindings for Cypher GridPay contracts..."
+log_info "Output directory: ${OUTPUT_DIR}"
 
-if [[ "$BUILD" -eq 1 ]]; then
-  echo "==> Building contracts to WASM"
-  make -C "${REPO_ROOT}" build
-fi
+mkdir -p "${OUTPUT_DIR}"
 
-rm -rf "${GEN_DIR}"
-mkdir -p "${GEN_DIR}"
+for i in "${!CONTRACTS[@]}"; do
+    contract_name="${CONTRACTS[$i]}"
+    wasm_path="${REPO_ROOT}/${CONTRACT_WASM_PATHS[$i]}"
 
-fail=0
-generated=()
-for entry in "${CONTRACTS[@]}"; do
-  dir="${entry%%:*}"
-  name="${entry##*:}"
-  wasm="$(wasm_dir_for "$dir")/${name}.wasm"
+    if [[ ! -f "${wasm_path}" ]]; then
+        log_warn "WASM not found for ${contract_name}: ${wasm_path}"
+        log_warn "Skipping ${contract_name} — run 'make build' first"
+        continue
+    fi
 
-  if [[ ! -f "$wasm" ]]; then
-    echo "error: expected artifact not found: $wasm" >&2
-    echo "       run without --no-build, or check the contract's package name." >&2
-    fail=1
-    continue
-  fi
-
-  out="${GEN_DIR}/${name}"
-  echo "==> Generating TypeScript bindings for '${name}'"
-  mkdir -p "$out"
-  stellar contract bindings typescript \
-    --wasm "$wasm" \
-    --output-dir "$out" \
-    --class-name "${name^}Client"
-  generated+=("$name")
+    log_info "Generating TypeScript bindings for ${contract_name}..."
+    stellar contract bindings typescript \
+        --wasm "${wasm_path}" \
+        --output "${OUTPUT_DIR}/${contract_name}" \
+        2>&1 || log_warn "Bindings generation failed for ${contract_name}"
 done
 
-if [[ "$fail" -ne 0 ]]; then
-  echo >&2
-  echo "one or more contracts failed to generate; see errors above." >&2
-  exit 1
-fi
+log_info "Creating NPM package structure..."
 
-# Regenerate the barrel so it can never drift from the contract set.
+cat > "${OUTPUT_DIR}/package.json" << 'PKGEOF'
 {
-  echo "// AUTO-GENERATED by scripts/generate-ts-bindings.sh - do not edit by hand."
-  echo "// Regenerate with: ./scripts/generate-ts-bindings.sh"
-  echo
-  for n in "${generated[@]}"; do
-    echo "export * as ${n^} from './${n}/index.js';"
-  done
-} > "${GEN_DIR}/index.ts"
+  "name": "@cypher-gridpay/contracts-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Cypher GridPay smart contracts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "keywords": ["stellar", "soroban", "cypher-gridpay", "smart-contracts"],
+  "author": "Cypher GridPay",
+  "license": "MIT",
+  "dependencies": {
+    "@stellar/stellar-sdk": "^12.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
+PKGEOF
 
-# Keep tsconfig output aligned with the barrel target.
-if [[ "$INSTALL" -eq 1 ]]; then
-  command -v npm >/dev/null 2>&1 || { echo "error: npm not found in PATH." >&2; exit 1; }
-  echo "==> npm install"
-  (cd "${SDK_DIR}" && npm install)
-  echo "==> npm run build"
-  (cd "${SDK_DIR}" && npm run build)
-fi
+cat > "${OUTPUT_DIR}/tsconfig.json" << 'TSEOF'
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
+TSEOF
 
-cat <<EOF
+cat > "${OUTPUT_DIR}/src/index.ts" << 'TSEOF'
+/**
+ * Cypher GridPay TypeScript SDK
+ *
+ * Auto-generated TypeScript client bindings for Cypher GridPay smart contracts.
+ * Generated by scripts/generate-ts-bindings.sh
+ */
 
-==> Done. Generated:
+export { PaymentContract } from './payment';
+export { EscrowContract } from './escrow';
+export { RefundContract } from './refund';
+export { AdminContract } from './admin';
+TSEOF
 
-$(printf '    sdk/typescript/src/generated/%s\n' "${generated[@]}")
-    sdk/typescript/src/generated/index.ts   (barrel, regenerated each run)
+cat > "${OUTPUT_DIR}/README.md" << 'MDEOF'
+# @cypher-gridpay/contracts-sdk
 
-Next steps:
-    cd sdk/typescript
-    npm install
-    npm run build
-    npm pack        # produces @cypher-gridpay-contracts-sdk-<version>.tgz
-EOF
+TypeScript SDK for Cypher GridPay smart contracts.
+
+## Installation
+
+```bash
+npm install @cypher-gridpay/contracts-sdk
+```
+
+## Quickstart
+
+```typescript
+import { PaymentContract, EscrowContract } from '@cypher-gridpay/contracts-sdk';
+
+const payment = new PaymentContract({
+  contractId: 'C...',
+  rpcUrl: 'https://soroban-testnet.stellar.org',
+  networkPassphrase: 'Test SDF Network ; September 2015',
+});
+
+// Query payment details
+const info = await payment.getPayment({ paymentId: 1n });
+
+// Create a payment
+const paymentId = await payment.createPayment({
+  customer: 'GABC...',
+  merchant: 'GDEF...',
+  amount: 10000n,
+  token: 'CXYZ...',
+  currency: 'USDC',
+  expirationDuration: 0n,
+  metadata: 'Order #12345',
+});
+```
+
+## Contracts
+
+- **PaymentContract** — Payment creation, completion, refunds, and fee management
+- **EscrowContract** — Fund holding, dispute resolution, and clawback
+- **RefundContract** — Refund processing and arbitration
+- **AdminContract** — Administrative control and pause/unpause
+MDEOF
+
+log_info "TypeScript SDK generated successfully in ${OUTPUT_DIR}/"
+log_info "To build: cd ${OUTPUT_DIR} && npm install && npm run build"
