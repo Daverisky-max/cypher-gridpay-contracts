@@ -12025,13 +12025,35 @@ impl PaymentContract {
         if accumulated <= 0 {
             return Err(Error::Feature(FeatureError::NothingToSweep));
         }
+
+        // Issue #111: Mathematical assertion — sweep amount must never exceed accumulated fees.
+        let sweep_amount: i128 = accumulated;
+        assert!(
+            sweep_amount <= accumulated,
+            "sweep_amount ({}) exceeds accumulated_fees ({})",
+            sweep_amount,
+            accumulated
+        );
+
+        // Issue #111: Require multisig approval for sweeps exceeding the threshold.
+        let sweep_threshold: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::LargePaymentThreshold))
+            .unwrap_or(0);
+        if sweep_threshold > 0 && sweep_amount > sweep_threshold {
+            if config.required_signatures > 1 {
+                return Err(Error::Basic(BasicError::InsufficientAdmins));
+            }
+        }
+
         let fee_config: FeeConfig = env
             .storage()
             .instance()
             .get(&DataKey::Config(ConfigKey::FeeConfig))
             .ok_or(Error::Feature(FeatureError::FeeConfigNotFound))?;
         let token_client = token::Client::new(&env, &fee_config.fee_token);
-        token_client.transfer(&env.current_contract_address(), &recipient, &accumulated);
+        token_client.transfer(&env.current_contract_address(), &recipient, &sweep_amount);
         env.storage()
             .instance()
             .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &0i128);
@@ -12046,7 +12068,7 @@ impl PaymentContract {
             .set(&DataKey::Feature(FeatureKey::SweepCounter), &sweep_id);
         let record = FeeSweepRecord {
             sweep_id,
-            amount: accumulated,
+            amount: sweep_amount,
             token: fee_config.fee_token,
             recipient,
             swept_at: env.ledger().timestamp(),
@@ -12055,7 +12077,7 @@ impl PaymentContract {
             &DataKey::Feature(FeatureKey::SweepHistory(sweep_id)),
             &record,
         );
-        Ok(accumulated)
+        Ok(sweep_amount)
     }
 
     /// Returns the most recent fee sweep records, up to the specified limit.
