@@ -21,6 +21,21 @@ pub enum DataKey {
     RefundContract,
 }
 
+/// Approximate number of ledgers closed per day (~5s per ledger).
+pub const DAY_IN_LEDGERS: u32 = 17_280;
+/// Instance TTL is extended to this many ledgers on every administrative call.
+pub const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+/// Instance TTL is only extended once it drops below this many ledgers.
+pub const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
+
+/// Extends the TTL of the contract instance (and its code) so the orchestrator
+/// never lapses into an archived state.
+fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
 #[contract]
 pub struct AdminContract;
 
@@ -65,8 +80,15 @@ impl AdminContract {
         env.storage()
             .instance()
             .set(&DataKey::RefundContract, &refund_contract);
+        extend_instance_ttl(&env);
 
         Ok(())
+    }
+
+    /// Extends the contract instance TTL. Callable by anyone, so keepers or
+    /// monitoring bots can keep the orchestrator alive between admin actions.
+    pub fn ping(env: Env) {
+        extend_instance_ttl(&env);
     }
 
     /// Pauses the payment, escrow, and refund contracts in one Soroban call.
@@ -84,6 +106,7 @@ impl AdminContract {
     /// stored pauser.
     pub fn emergency_pause_all(env: Env, pauser: Address, reason: String) -> Result<(), Error> {
         pauser.require_auth();
+        extend_instance_ttl(&env);
 
         let stored_pauser: Address = env
             .storage()
@@ -131,6 +154,7 @@ impl AdminContract {
     /// stored pauser.
     pub fn emergency_unpause_all(env: Env, pauser: Address) -> Result<(), Error> {
         pauser.require_auth();
+        extend_instance_ttl(&env);
 
         let stored_pauser: Address = env
             .storage()
@@ -180,6 +204,7 @@ impl AdminContract {
         payment_contract: Address,
     ) -> Result<(), Error> {
         admin.require_auth();
+        extend_instance_ttl(&env);
 
         let stored_admin: Address = env
             .storage()
@@ -213,6 +238,7 @@ impl AdminContract {
         escrow_contract: Address,
     ) -> Result<(), Error> {
         admin.require_auth();
+        extend_instance_ttl(&env);
 
         let stored_admin: Address = env
             .storage()
@@ -246,6 +272,7 @@ impl AdminContract {
         refund_contract: Address,
     ) -> Result<(), Error> {
         admin.require_auth();
+        extend_instance_ttl(&env);
 
         let stored_admin: Address = env
             .storage()
@@ -267,7 +294,7 @@ impl AdminContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{storage::Instance as _, Address as _, Ledger};
 
     fn setup_payment(env: &Env, admin: &Address) -> Address {
         let contract_id = env.register(payments::PaymentContract, ());
@@ -315,5 +342,34 @@ mod test {
         let reason = String::from_str(&env, "security incident");
         client.emergency_pause_all(&pauser, &reason);
         client.emergency_unpause_all(&pauser);
+    }
+
+    #[test]
+    fn test_ping_extends_instance_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin_contract_id = env.register(AdminContract, ());
+        let client = AdminContractClient::new(&env, &admin_contract_id);
+
+        let admin = Address::generate(&env);
+        let pauser = Address::generate(&env);
+        client.initialize(
+            &admin,
+            &pauser,
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &Address::generate(&env),
+        );
+
+        let ttl = || env.as_contract(&admin_contract_id, || env.storage().instance().get_ttl());
+        assert_eq!(ttl(), INSTANCE_BUMP_AMOUNT);
+
+        // Let the TTL decay below the threshold, then ping to restore it.
+        env.ledger().with_mut(|l| l.sequence_number += 2 * DAY_IN_LEDGERS);
+        assert!(ttl() < INSTANCE_LIFETIME_THRESHOLD);
+
+        client.ping();
+        assert_eq!(ttl(), INSTANCE_BUMP_AMOUNT);
     }
 }
