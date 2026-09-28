@@ -117,3 +117,8 @@ Recommended migration path:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-10 -->
+- #10: payment: Implement dynamic risk fee surcharge updates based on merchant chargeback history
