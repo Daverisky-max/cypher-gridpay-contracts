@@ -211,6 +211,11 @@ pub enum RefundStatus {
     Rejected,
     Processed,
     PendingAppeal,
+    // Issue #64: distinct terminal state for a refund whose denial was
+    // confirmed on appeal (the appeal was "upheld" in favor of the
+    // merchant), as opposed to `Rejected`, which is the initial merchant
+    // denial before any appeal has been decided.
+    PermanentlyDenied,
 }
 
 // Issue #397: canonical reason codes, enforced by the type system on Refund and
@@ -1895,6 +1900,18 @@ impl RefundContract {
     /// Returns `Unauthorized` if the caller is not the admin.
     /// Returns `AlreadyProcessed` if the appeal is already resolved.
     /// Returns `RefundNotFound` if the appeal or refund does not exist.
+    /// Resolve a pending refund appeal.
+    ///
+    /// Issue #64: state-transition semantics are unambiguous:
+    /// - `uphold = true` means the appeal is upheld in favor of the
+    ///   customer (the original merchant denial is *overturned*): the
+    ///   underlying `Refund` transitions to `RefundStatus::Approved` and is
+    ///   processed.
+    /// - `uphold = false` means the appeal is denied and the merchant's
+    ///   original denial is *upheld*: the underlying `Refund` transitions
+    ///   to the terminal `RefundStatus::PermanentlyDenied` state rather than
+    ///   the pre-appeal `Rejected` state, so callers can distinguish "denied,
+    ///   appeal pending/available" from "denied, appeal exhausted".
     pub fn resolve_appeal(
         env: Env,
         admin: Address,
@@ -1958,12 +1975,16 @@ impl RefundContract {
             // now — no need to wait out the rest of the appeal window.
             if refund.status == RefundStatus::PendingAppeal {
                 Self::remove_from_status_index(&env, RefundStatus::PendingAppeal, refund.id)?;
-                refund.status = RefundStatus::Rejected;
+                // Issue #64: the appeal was upheld against the customer, so
+                // the merchant's denial is final — move to the distinct
+                // `PermanentlyDenied` terminal state rather than reusing the
+                // pre-appeal `Rejected` status.
+                refund.status = RefundStatus::PermanentlyDenied;
                 refund.rejected_at = Some(env.ledger().timestamp());
                 env.storage()
                     .instance()
                     .set(&DataKey::Refund(refund.id), &refund);
-                Self::add_to_status_index(&env, RefundStatus::Rejected, refund.id);
+                Self::add_to_status_index(&env, RefundStatus::PermanentlyDenied, refund.id);
                 Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
             }
         }
@@ -4094,6 +4115,9 @@ impl RefundContract {
                         RefundStatus::PendingAppeal => {
                             pending_count += 1;
                             pending_amount += refund.amount;
+                        }
+                        RefundStatus::PermanentlyDenied => {
+                            total_rejected += 1;
                         }
                     }
                 }

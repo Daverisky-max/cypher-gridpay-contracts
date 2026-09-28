@@ -2212,10 +2212,55 @@ fn test_resolve_appeal_rejected_keeps_refund_rejected() {
     let appeal_id = client.file_appeal(&customer, &refund_id, &String::from_str(&env, "challenge"));
     client.resolve_appeal(&admin, &appeal_id, &false);
 
+    // Issue #64: an appeal that upholds the merchant's denial moves the
+    // refund to the distinct terminal `PermanentlyDenied` state, not the
+    // pre-appeal `Rejected` state.
     let refund = client.get_refund(&refund_id);
-    assert_eq!(refund.status, RefundStatus::Rejected);
+    assert_eq!(refund.status, RefundStatus::PermanentlyDenied);
 
     let resolved = client.get_appeal(&appeal_id);
     assert_eq!(resolved.resolved, true);
     assert_eq!(resolved.outcome, Some(false));
+}
+
+#[test]
+fn test_resolve_appeal_overturned_approves_refund() {
+    // Issue #64: an appeal upheld in the customer's favor (overturning the
+    // merchant's denial) transitions the refund to `Approved`.
+    let env = Env::default();
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let merchant = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let refund_id = client.request_refund(
+        &merchant,
+        &5u64,
+        &customer,
+        &300i128,
+        &300i128,
+        &token,
+        &String::from_str(&env, "request"),
+        &RefundReasonCode::Other,
+        &env.ledger().timestamp(),
+    );
+    client.reject_refund(&admin, &refund_id, &String::from_str(&env, "rejected"));
+
+    let appeal_id = client.file_appeal(&customer, &refund_id, &String::from_str(&env, "challenge"));
+    client.resolve_appeal(&admin, &appeal_id, &true);
+
+    let refund = client.get_refund(&refund_id);
+    assert_eq!(refund.status, RefundStatus::Approved);
+
+    let resolved = client.get_appeal(&appeal_id);
+    assert_eq!(resolved.resolved, true);
+    assert_eq!(resolved.outcome, Some(true));
 }
