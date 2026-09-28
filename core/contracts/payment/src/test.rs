@@ -7687,3 +7687,49 @@ fn test_recurring_billing_blocked_when_merchant_paused_mid_cycle() {
     assert_eq!(sub.status, SubscriptionStatus::Active);
     assert_eq!(sub.payment_count, 1);
 }
+
+#[test]
+fn test_administrative_functions_require_auth() {
+    // Systematic tests verifying require_auth failures across administrative functions.
+    // When env.mock_all_auths() is omitted, calls without required authorization fail.
+    let env = Env::default();
+    let contract_id = env.register(PaymentContract, ());
+    let client = PaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    // 1. initialize
+    let init_res = client.try_initialize(&admin);
+    assert!(init_res.is_err(), "initialize must require admin auth");
+
+    // 2. set_fee_config
+    let fee_config = FeeConfig {
+        fee_bps: 100,
+        min_fee: 10,
+        max_fee: 1000,
+        treasury: admin.clone(),
+        fee_token: admin.clone(),
+        active: true,
+    };
+    let fee_res = client.try_set_fee_config(&admin, &fee_config);
+    assert!(fee_res.is_err(), "set_fee_config must require admin auth");
+
+    // 3. add_admin
+    let new_admin = Address::generate(&env);
+    let add_admin_res = client.try_add_admin(&admin, &new_admin);
+    assert!(add_admin_res.is_err(), "add_admin must require caller auth");
+
+    // 4. sweep_fees and sweep_platform_fees
+    let sweep_res = client.try_sweep_fees(&admin, &100i128);
+    assert!(sweep_res.is_err(), "sweep_fees must require admin auth");
+
+    let sweep_platform_res = client.try_sweep_platform_fees(&admin);
+    assert!(sweep_platform_res.is_err(), "sweep_platform_fees must require admin auth");
+
+    // 5. pause and pause_contract
+    let reason = String::from_str(&env, "emergency pause");
+    let pause_res = client.try_pause(&admin, &reason);
+    assert!(pause_res.is_err(), "pause must require admin auth");
+
+    let pause_contract_res = client.try_pause_contract(&admin, &reason);
+    assert!(pause_contract_res.is_err(), "pause_contract must require admin auth");
+}

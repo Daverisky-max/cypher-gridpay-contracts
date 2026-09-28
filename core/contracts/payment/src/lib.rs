@@ -1837,6 +1837,7 @@ impl PaymentContract {
     /// # Panics
     /// Panics if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env
             .storage()
             .instance()
@@ -9752,8 +9753,11 @@ impl PaymentContract {
     /// # Returns
     /// `Ok(())` on success.
     ///
-    /// # Errors
-    /// Returns an error if the caller is not an authorized admin.
+    /// Alias for pause_contract to pause all operations.
+    pub fn pause(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        Self::pause_contract(env, admin, reason)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
@@ -11387,11 +11391,13 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::InvalidAmount));
         }
 
-        // Verify signature over (channel_id, merchant_amount, nonce)
+        // Verify signature over (channel_id, merchant_amount, nonce, contract_address)
+        // to prevent cross-channel and cross-contract replay attacks
         let mut msg = Bytes::new(&env);
         msg.append(&channel_id.to_xdr(&env));
         msg.append(&merchant_amount.to_xdr(&env));
         msg.append(&nonce.to_xdr(&env));
+        msg.append(&env.current_contract_address().to_xdr(&env));
 
         env.crypto()
             .ed25519_verify(&channel.customer_pk, &msg, &signature);
@@ -12002,7 +12008,20 @@ impl PaymentContract {
     /// # Errors
     /// Returns an error if the caller is not an admin, the sweep recipient
     /// is not set, the fee config is missing, or there are no fees to sweep.
-    pub fn sweep_platform_fees(env: Env, admin: Address) -> Result<i128, Error> {
+    /// Sweeps up to `sweep_amount` of accumulated platform fees to the configured recipient.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must be a multi-sig admin).
+    /// * `sweep_amount` - The amount of accumulated fees to sweep.
+    ///
+    /// # Returns
+    /// The amount swept as `i128`.
+    ///
+    /// # Errors
+    /// Returns an error if the caller is not an admin, the sweep recipient
+    /// is not set, accumulated fees are empty, `sweep_amount` exceeds accumulated fees,
+    /// or multisig approval is required for amounts above threshold.
+    pub fn sweep_fees(env: Env, admin: Address, sweep_amount: i128) -> Result<i128, Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
             .storage()
@@ -12025,16 +12044,29 @@ impl PaymentContract {
         if accumulated <= 0 {
             return Err(Error::Feature(FeatureError::NothingToSweep));
         }
+        // Mathematical assertion: sweep_amount <= accumulated_fees
+        if sweep_amount <= 0 || sweep_amount > accumulated {
+            return Err(Error::Feature(FeatureError::InsufficientFees));
+        }
+
+        // Require multisig approval for sweeps exceeding a defined threshold
+        let threshold = PaymentContract::get_large_payment_threshold(env.clone());
+        let multisig_threshold = if threshold > 0 { threshold } else { 1_000_000 };
+        if sweep_amount > multisig_threshold && config.required_signatures > 1 {
+            return Err(Error::Proposal(ProposalError::RequiresMultiSig));
+        }
+
         let fee_config: FeeConfig = env
             .storage()
             .instance()
             .get(&DataKey::Config(ConfigKey::FeeConfig))
             .ok_or(Error::Feature(FeatureError::FeeConfigNotFound))?;
         let token_client = token::Client::new(&env, &fee_config.fee_token);
-        token_client.transfer(&env.current_contract_address(), &recipient, &accumulated);
+        token_client.transfer(&env.current_contract_address(), &recipient, &sweep_amount);
+        let remaining = accumulated - sweep_amount;
         env.storage()
             .instance()
-            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &0i128);
+            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &remaining);
         let sweep_id: u64 = env
             .storage()
             .instance()
@@ -12046,7 +12078,7 @@ impl PaymentContract {
             .set(&DataKey::Feature(FeatureKey::SweepCounter), &sweep_id);
         let record = FeeSweepRecord {
             sweep_id,
-            amount: accumulated,
+            amount: sweep_amount,
             token: fee_config.fee_token,
             recipient,
             swept_at: env.ledger().timestamp(),
@@ -12055,7 +12087,31 @@ impl PaymentContract {
             &DataKey::Feature(FeatureKey::SweepHistory(sweep_id)),
             &record,
         );
-        Ok(accumulated)
+        Ok(sweep_amount)
+    }
+
+    /// Sweeps all accumulated platform fees to the configured recipient.
+    ///
+    /// Transfers the full accumulated fee balance, resets the counter,
+    /// and records the sweep in history.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must be a multi-sig admin).
+    ///
+    /// # Returns
+    /// The amount swept as `i128`.
+    ///
+    /// # Errors
+    /// Returns an error if the caller is not an admin, the sweep recipient
+    /// is not set, the fee config is missing, or there are no fees to sweep.
+    pub fn sweep_platform_fees(env: Env, admin: Address) -> Result<i128, Error> {
+        let accumulated: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::AccumulatedFees))
+            .unwrap_or(0);
+        let amount = if accumulated > 0 { accumulated } else { 0 };
+        Self::sweep_fees(env, admin, amount)
     }
 
     /// Returns the most recent fee sweep records, up to the specified limit.
