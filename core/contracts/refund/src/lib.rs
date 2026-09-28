@@ -113,6 +113,20 @@ pub enum ArbitrationKey {
     // Uniqueness guard: maps refund_id -> case_id so the same refund
     // cannot be escalated into multiple parallel arbitration cases.
     CaseByRefund(u64),
+    // Time-decay settings for inactive arbitrators' reputation scores
+    ReputationDecayConfig,
+}
+
+// Protocol-level fee configuration and accounting.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum ConfigKey {
+    // Protocol maintenance fee (bps) deducted from arbitration awards
+    ArbitrationProtocolFeeBps,
+    // Protocol fees collected and held by the contract, per token
+    AccumulatedFees(Address),
+    // Marks a refund whose approval was awarded by arbitration
+    ArbitrationAward(u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -308,6 +322,10 @@ pub enum ExtError {
     // Issue #389: two-step admin rotation errors
     NoPendingAdmin = 59,
     NotPendingAdmin = 60,
+    // A payment may have at most one active (unresolved) refund at a time
+    ActiveRefundExists = 61,
+    // Reputation decay config out of range
+    InvalidReputationDecayConfig = 62,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -545,6 +563,36 @@ pub struct ArbitratorReputation {
     pub avg_resolution_time: u64,
     pub score: i128,
     pub last_active: u64,
+}
+
+/// Reputation time-decay settings: a positive score loses `decay_bps` for
+/// every full `inactivity_period_secs` the arbitrator has been inactive,
+/// once inactivity exceeds one period.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct ReputationDecayConfig {
+    pub decay_bps: u32,
+    pub inactivity_period_secs: u64,
+}
+
+// Defaults: 10% decay per 60 days of inactivity.
+pub const DEFAULT_REPUTATION_DECAY_BPS: u32 = 1_000;
+pub const DEFAULT_REPUTATION_INACTIVITY_SECS: u64 = 60 * 24 * 60 * 60;
+// Cap on compounded periods; after this many the score is effectively zero.
+const MAX_REPUTATION_DECAY_PERIODS: u64 = 64;
+
+// Default protocol maintenance fee on arbitration awards: 2%.
+pub const DEFAULT_ARBITRATION_PROTOCOL_FEE_BPS: u32 = 200;
+// Upper bound for the arbitration protocol fee: 10%.
+pub const MAX_ARBITRATION_PROTOCOL_FEE_BPS: u32 = 1_000;
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolFeeCollected {
+    pub refund_id: u64,
+    pub token: Address,
+    pub fee_amount: i128,
+    pub net_award: i128,
 }
 
 #[contractevent]
@@ -1687,8 +1735,11 @@ impl RefundContract {
 
         Self::remove_from_status_index(&env, RefundStatus::PendingAppeal, refund_id)?;
 
+        // Keep the original denial time (set in begin_refund_rejection);
+        // finalizing must not reopen the appeal window.
+        let denied_at = refund.rejected_at.unwrap_or(now);
         refund.status = RefundStatus::Rejected;
-        refund.rejected_at = Some(now);
+        refund.rejected_at = Some(denied_at);
         env.storage()
             .instance()
             .set(&DataKey::Refund(refund_id), &refund);
@@ -1696,7 +1747,7 @@ impl RefundContract {
         Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
         env.storage()
             .instance()
-            .set(&SystemKey::RefundRejectedAt(refund_id), &now);
+            .set(&SystemKey::RefundRejectedAt(refund_id), &denied_at);
 
         let rejected_by = refund
             .rejected_by
@@ -1743,6 +1794,9 @@ impl RefundContract {
 
         refund.status = RefundStatus::PendingAppeal;
         refund.rejected_by = Some(admin.clone());
+        // Denial time: the appeal window runs from here and is not restarted
+        // when the denial is later finalized.
+        refund.rejected_at = Some(now);
         refund.appeal_deadline = Some(now.saturating_add(appeal_window));
 
         env.storage()
@@ -1808,28 +1862,31 @@ impl RefundContract {
             return Err(Error::Core(CoreError::AppealAlreadyFiled));
         }
 
+        // Appeals are allowed only while now <= denied_at + appeal window,
+        // whatever the refund's current status. The deadline fixed at denial
+        // time wins; otherwise derive it from the recorded denial timestamp.
         let now = env.ledger().timestamp();
-        if refund.status == RefundStatus::PendingAppeal {
-            let appeal_deadline = refund
-                .appeal_deadline
-                .ok_or(Error::Core(CoreError::RefundNotRejected))?;
-            if now > appeal_deadline {
-                return Err(Error::Core(CoreError::AppealWindowExpired));
+        let appeal_deadline = match refund.appeal_deadline {
+            Some(deadline) => deadline,
+            None => {
+                let denied_at: u64 = refund
+                    .rejected_at
+                    .or_else(|| {
+                        env.storage()
+                            .instance()
+                            .get(&SystemKey::RefundRejectedAt(refund_id))
+                    })
+                    .ok_or(Error::Core(CoreError::RefundNotRejected))?;
+                let appeal_window: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::AppealWindowSeconds)
+                    .unwrap_or(604800);
+                denied_at.saturating_add(appeal_window)
             }
-        } else {
-            let rejected_at: u64 = env
-                .storage()
-                .instance()
-                .get(&SystemKey::RefundRejectedAt(refund_id))
-                .ok_or(Error::Core(CoreError::RefundNotRejected))?;
-            let appeal_window: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::AppealWindowSeconds)
-                .unwrap_or(604800);
-            if now > rejected_at.saturating_add(appeal_window) {
-                return Err(Error::Core(CoreError::AppealWindowExpired));
-            }
+        };
+        if now > appeal_deadline {
+            return Err(Error::Core(CoreError::AppealWindowExpired));
         }
 
         let counter: u64 = env
@@ -2915,10 +2972,15 @@ impl RefundContract {
             .get(&DataKey::Refund(case.refund_id))
             .unwrap();
         if approved {
+            Self::mark_arbitration_award(&env, case.refund_id);
+            // Move the refund in the status index too, or process_refund
+            // can't find it under Approved and the award is never paid.
+            Self::remove_from_status_index(&env, refund.status.clone(), refund.id)?;
             refund.status = RefundStatus::Approved;
             env.storage()
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
+            Self::add_to_status_index(&env, RefundStatus::Approved, refund.id);
 
             (RefundApproved {
                 refund_id: case.refund_id,
@@ -3093,7 +3155,10 @@ impl RefundContract {
                     last_active: current_time,
                 });
 
+            // Apply any inactivity decay before the new outcome, since
+            // last_active is about to be reset.
             let old_score = reputation.score;
+            reputation = Self::decayed_reputation(&env, reputation);
 
             // Update vote counts
             reputation.total_cases += 1;
@@ -3328,10 +3393,15 @@ impl RefundContract {
                 .instance()
                 .get(&DataKey::Refund(case.refund_id))
                 .unwrap();
+            Self::mark_arbitration_award(&env, case.refund_id);
+            // Move the refund in the status index too, or process_refund
+            // can't find it under Approved and the award is never paid.
+            Self::remove_from_status_index(&env, refund.status.clone(), refund.id)?;
             refund.status = RefundStatus::Approved;
             env.storage()
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
+            Self::add_to_status_index(&env, RefundStatus::Approved, refund.id);
 
             (RefundApproved {
                 refund_id: case.refund_id,
@@ -3613,7 +3683,10 @@ impl RefundContract {
         Ok(())
     }
 
-    /// Get the reputation information for a specific arbitrator
+    /// Get the reputation information for a specific arbitrator.
+    ///
+    /// The returned `score` has inactivity decay applied (see
+    /// [`Self::set_reputation_decay_config`]).
     pub fn get_arbitrator_reputation(
         env: Env,
         arbitrator: Address,
@@ -3621,6 +3694,82 @@ impl RefundContract {
         env.storage()
             .instance()
             .get(&ArbitrationKey::ArbitratorReputation(arbitrator))
+            .map(|rep| Self::decayed_reputation(&env, rep))
+    }
+
+    /// Configure time-decay of inactive arbitrators' reputation scores.
+    ///
+    /// A positive score loses `decay_bps` (compounded) for every full
+    /// `inactivity_period_secs` since the arbitrator was last active, once
+    /// they have been inactive for longer than one period.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the admin.
+    /// Returns `InvalidReputationDecayConfig` if `decay_bps > 10000` or
+    /// `inactivity_period_secs == 0`.
+    pub fn set_reputation_decay_config(
+        env: Env,
+        admin: Address,
+        decay_bps: u32,
+        inactivity_period_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if decay_bps > 10_000 || inactivity_period_secs == 0 {
+            return Err(Error::Ext(ExtError::InvalidReputationDecayConfig));
+        }
+        env.storage().instance().set(
+            &ArbitrationKey::ReputationDecayConfig,
+            &ReputationDecayConfig {
+                decay_bps,
+                inactivity_period_secs,
+            },
+        );
+        Ok(())
+    }
+
+    /// Get the reputation decay configuration (defaults: 10% per 60 days).
+    pub fn get_reputation_decay_config(env: Env) -> ReputationDecayConfig {
+        env.storage()
+            .instance()
+            .get(&ArbitrationKey::ReputationDecayConfig)
+            .unwrap_or(ReputationDecayConfig {
+                decay_bps: DEFAULT_REPUTATION_DECAY_BPS,
+                inactivity_period_secs: DEFAULT_REPUTATION_INACTIVITY_SECS,
+            })
+    }
+
+    /// Return `rep` with inactivity decay applied to its score, based on the
+    /// ledger timestamp. Only positive scores decay, so inactivity never
+    /// improves a negative score.
+    fn decayed_reputation(env: &Env, mut rep: ArbitratorReputation) -> ArbitratorReputation {
+        if rep.score <= 0 {
+            return rep;
+        }
+        let config = Self::get_reputation_decay_config(env.clone());
+        let inactive_for = env.ledger().timestamp().saturating_sub(rep.last_active);
+        if config.decay_bps == 0 || inactive_for <= config.inactivity_period_secs {
+            return rep;
+        }
+        let periods = core::cmp::min(
+            inactive_for / config.inactivity_period_secs,
+            MAX_REPUTATION_DECAY_PERIODS,
+        );
+        let keep_bps = 10_000i128 - config.decay_bps as i128;
+        for _ in 0..periods {
+            rep.score = rep.score * keep_bps / 10_000;
+            if rep.score == 0 {
+                break;
+            }
+        }
+        rep
     }
 
     /// Get the top arbitrators sorted by score (highest first)
@@ -3649,7 +3798,8 @@ impl RefundContract {
                     arbitrator.clone(),
                 ))
             {
-                reputations.push_back(reputation);
+                // Rank by decayed score so long-inactive arbitrators drop.
+                reputations.push_back(Self::decayed_reputation(&env, reputation));
             }
         }
 
@@ -3714,7 +3864,7 @@ impl RefundContract {
                 .get(&ArbitrationKey::ArbitratorReputation(arbitrator.clone()));
 
             let should_remove = if let Some(rep) = reputation {
-                rep.score < min_score
+                Self::decayed_reputation(&env, rep).score < min_score
             } else {
                 false
             };
@@ -3796,6 +3946,131 @@ impl RefundContract {
         env.storage()
             .instance()
             .get(&ArbitrationKey::ArbitrationFeeConfig)
+    }
+
+    /// Set the protocol maintenance fee deducted from arbitration awards.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the admin.
+    /// Returns `InvalidFeeConfig` if `fee_bps` exceeds `MAX_ARBITRATION_PROTOCOL_FEE_BPS`.
+    pub fn set_arbitration_protocol_fee(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if fee_bps > MAX_ARBITRATION_PROTOCOL_FEE_BPS {
+            return Err(Error::Core(CoreError::InvalidFeeConfig));
+        }
+        env.storage()
+            .instance()
+            .set(&ConfigKey::ArbitrationProtocolFeeBps, &fee_bps);
+        Ok(())
+    }
+
+    /// Get the arbitration protocol fee in basis points (default 2%).
+    pub fn get_arbitration_protocol_fee(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&ConfigKey::ArbitrationProtocolFeeBps)
+            .unwrap_or(DEFAULT_ARBITRATION_PROTOCOL_FEE_BPS)
+    }
+
+    /// Get the protocol fees accumulated (and held by this contract) in `token`.
+    pub fn get_accumulated_protocol_fees(env: Env, token: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&ConfigKey::AccumulatedFees(token))
+            .unwrap_or(0)
+    }
+
+    /// Withdraw all accumulated protocol fees in `token` to `recipient`.
+    ///
+    /// # Returns
+    /// The amount withdrawn.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the admin.
+    /// Returns `InsufficientTreasuryFees` if nothing has accumulated.
+    pub fn withdraw_protocol_fees(
+        env: Env,
+        admin: Address,
+        token: Address,
+        recipient: Address,
+    ) -> Result<i128, Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        let key = ConfigKey::AccumulatedFees(token.clone());
+        let accumulated: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        if accumulated <= 0 {
+            return Err(Error::Core(CoreError::InsufficientTreasuryFees));
+        }
+        env.storage().instance().set(&key, &0i128);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &accumulated,
+        );
+        Ok(accumulated)
+    }
+
+    fn mark_arbitration_award(env: &Env, refund_id: u64) {
+        env.storage()
+            .instance()
+            .set(&ConfigKey::ArbitrationAward(refund_id), &true);
+    }
+
+    /// If `refund_id` was awarded by arbitration, deduct the protocol fee
+    /// from `payout`, credit it to `ConfigKey::AccumulatedFees(token)` (the
+    /// tokens stay in the contract), and return the net payout.
+    fn deduct_arbitration_protocol_fee(
+        env: &Env,
+        refund_id: u64,
+        payout: i128,
+        token: &Address,
+    ) -> i128 {
+        let award_key = ConfigKey::ArbitrationAward(refund_id);
+        if !env.storage().instance().has(&award_key) || payout <= 0 {
+            return payout;
+        }
+        // One-shot: an award is paid out once.
+        env.storage().instance().remove(&award_key);
+
+        let fee_bps = Self::get_arbitration_protocol_fee(env.clone()) as i128;
+        let fee = payout.saturating_mul(fee_bps) / 10_000;
+        if fee <= 0 {
+            return payout;
+        }
+        let fees_key = ConfigKey::AccumulatedFees(token.clone());
+        let accumulated: i128 = env.storage().instance().get(&fees_key).unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&fees_key, &accumulated.saturating_add(fee));
+
+        let net_award = payout - fee;
+        ProtocolFeeCollected {
+            refund_id,
+            token: token.clone(),
+            fee_amount: fee,
+            net_award,
+        }
+        .publish(env);
+        net_award
     }
 
     /// Get the accumulated treasury fees from arbitration cases
@@ -5519,6 +5794,43 @@ impl RefundContract {
         }
     }
 
+    /// Reject a new refund request if the payment already has an active one.
+    ///
+    /// Active means still unresolved: `Requested` (and not TTL-expired),
+    /// `Approved` (awaiting payout), or `PendingAppeal`. Sequential partial
+    /// refunds remain possible once earlier ones are processed or rejected.
+    fn ensure_no_active_refund_for_payment(env: &Env, payment_id: u64) -> Result<(), Error> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentRefundCount(payment_id))
+            .unwrap_or(0);
+        let now = env.ledger().timestamp();
+        for i in 0..count {
+            let refund_id: u64 = match env
+                .storage()
+                .instance()
+                .get(&DataKey::PaymentRefunds(payment_id, i))
+            {
+                Some(id) => id,
+                None => continue,
+            };
+            let refund: Refund = match env.storage().instance().get(&DataKey::Refund(refund_id)) {
+                Some(r) => r,
+                None => continue,
+            };
+            let active = match refund.status {
+                RefundStatus::Requested => refund.expires_at.is_none_or(|exp| now < exp),
+                RefundStatus::Approved | RefundStatus::PendingAppeal => true,
+                RefundStatus::Rejected | RefundStatus::Processed => false,
+            };
+            if active {
+                return Err(Error::Ext(ExtError::ActiveRefundExists));
+            }
+        }
+        Ok(())
+    }
+
     fn create_refund(
         env: Env,
         merchant: Address,
@@ -5557,6 +5869,11 @@ impl RefundContract {
                 return Err(Error::Core(CoreError::PaymentOwnershipMismatch));
             }
         }
+
+        // Bind rate limiting to the payment as well as the customer address:
+        // fresh throwaway customer addresses can't open parallel refunds
+        // against the same payment.
+        Self::ensure_no_active_refund_for_payment(&env, payment_id)?;
 
         Self::can_refund_payment(&env, payment_id, amount, original_payment_amount)?;
         Self::check_and_update_circuit_breaker(&env, amount, original_payment_amount)?;
@@ -5796,6 +6113,9 @@ impl RefundContract {
         // Deduct platform fee from refund amount
         let (net_refund_amount, _fee_amount) =
             Self::deduct_refund_fee(env, refund_id, refund.amount, &refund.token)?;
+        // Arbitration awards additionally carry the protocol maintenance fee.
+        let net_refund_amount =
+            Self::deduct_arbitration_protocol_fee(env, refund_id, net_refund_amount, &refund.token);
 
         if net_refund_amount > 0 {
             token::Client::new(env, &refund.token).transfer(
