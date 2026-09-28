@@ -177,6 +177,7 @@ pub enum EscrowError {
     InvalidThreshold = 227,
     SuccessionPlanExists = 228,
     ClawbackDelayTooShort = 229,
+    EvidenceLimitExceeded = 230,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -4463,8 +4464,14 @@ impl EscrowContract {
         }
 
         const MAX_BATCH: u32 = 10;
+        const MAX_HASH_LEN: u32 = 64;
         if evidence_items.len() > MAX_BATCH {
             return Err(Error::Escrow(EscrowError::BatchTooLarge));
+        }
+        for item in evidence_items.iter() {
+            if item.len() > MAX_HASH_LEN {
+                return Err(Error::Escrow(EscrowError::EvidenceLimitExceeded));
+            }
         }
 
         let now = env.ledger().timestamp();
