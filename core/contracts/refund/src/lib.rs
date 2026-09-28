@@ -615,6 +615,9 @@ pub struct RefundVoucher {
     pub issued_at: u64,
     pub expires_at: u64,
     pub redeemed: bool,
+    // Issue #60: tracks partial redemptions; starts equal to `amount` and is
+    // decremented as the customer redeems partial amounts across purchases.
+    pub remaining_balance: i128,
 }
 
 // Issue #194: Tiered arbitration escalation
@@ -8434,6 +8437,7 @@ impl RefundContract {
             issued_at: now,
             expires_at: now.saturating_add(expiry_seconds),
             redeemed: false,
+            remaining_balance: refund.amount,
         };
 
         env.storage()
@@ -8508,6 +8512,69 @@ impl RefundContract {
         );
 
         voucher.redeemed = true;
+        voucher.remaining_balance = 0;
+        env.storage()
+            .instance()
+            .set(&VoucherKey::Voucher(voucher_id), &voucher);
+
+        Ok(())
+    }
+
+    /// Partially (or fully) redeem a store credit voucher, allowing a customer to
+    /// spread a single voucher's balance across multiple purchases.
+    ///
+    /// # Arguments
+    /// * `customer` - The customer redeeming the voucher (must authenticate).
+    /// * `voucher_id` - The ID of the voucher to redeem from.
+    /// * `amount` - The amount to redeem from the voucher's remaining balance.
+    ///
+    /// # Errors
+    /// Returns `VoucherNotFound` if the voucher does not exist.
+    /// Returns `Unauthorized` if the caller is not the voucher's customer.
+    /// Returns `VoucherAlreadyRedeemed` if the voucher's balance is already exhausted.
+    /// Returns `VoucherExpired` if the voucher has expired.
+    /// Returns `InvalidAmount` if `amount` is not positive or exceeds the remaining balance.
+    pub fn redeem_voucher(
+        env: Env,
+        customer: Address,
+        voucher_id: u64,
+        amount: i128,
+    ) -> Result<(), Error> {
+        customer.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::Core(CoreError::InvalidAmount));
+        }
+
+        let mut voucher: RefundVoucher = env
+            .storage()
+            .instance()
+            .get(&VoucherKey::Voucher(voucher_id))
+            .ok_or(Error::Ext(ExtError::VoucherNotFound))?;
+
+        if voucher.customer != customer {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if voucher.redeemed || voucher.remaining_balance <= 0 {
+            return Err(Error::Ext(ExtError::VoucherAlreadyRedeemed));
+        }
+        if env.ledger().timestamp() > voucher.expires_at {
+            return Err(Error::Ext(ExtError::VoucherExpired));
+        }
+        if amount > voucher.remaining_balance {
+            return Err(Error::Core(CoreError::InvalidAmount));
+        }
+
+        token::Client::new(&env, &voucher.token).transfer(
+            &env.current_contract_address(),
+            &customer,
+            &amount,
+        );
+
+        voucher.remaining_balance -= amount;
+        if voucher.remaining_balance == 0 {
+            voucher.redeemed = true;
+        }
         env.storage()
             .instance()
             .set(&VoucherKey::Voucher(voucher_id), &voucher);
