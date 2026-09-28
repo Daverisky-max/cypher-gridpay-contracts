@@ -122,3 +122,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-10 -->
 - #10: payment: Implement dynamic risk fee surcharge updates based on merchant chargeback history
+
+<!-- handsoff-issue-11 -->
+- #11: payment: Add nonce and replay protection to multisig action proposal execution
