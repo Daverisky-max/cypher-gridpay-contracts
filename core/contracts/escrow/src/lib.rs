@@ -7,6 +7,11 @@ use soroban_sdk::{
     Vec,
 };
 
+/// Maximum number of pause-history entries retained in storage. Older
+/// entries are overwritten in a circular buffer so that pause history
+/// cannot grow the ledger without bound.
+pub const PAUSE_HISTORY_LIMIT: u64 = 20;
+
 #[derive(Clone)]
 #[contracttype]
 pub enum ConfigKey {
@@ -7784,8 +7789,11 @@ impl EscrowContract {
             unpaused_at: None,
             reason: reason.clone(),
         };
+        // Circular buffer: reuse the slot of the oldest entry once the
+        // retention limit is reached, so history storage stays bounded.
+        let slot = Self::pause_history_slot(history_count);
         env.storage().instance().set(
-            &DataKey::Config(ConfigKey::PauseHistoryEntry(history_count)),
+            &DataKey::Config(ConfigKey::PauseHistoryEntry(slot)),
             &entry,
         );
         env.storage().instance().set(
@@ -7845,19 +7853,24 @@ impl EscrowContract {
                 global_key.clone(),
             )))
         {
+            let active_slot = Self::pause_history_slot(active_idx);
             if let Some(mut entry) =
                 env.storage()
                     .instance()
                     .get::<DataKey, PauseHistory>(&DataKey::Config(ConfigKey::PauseHistoryEntry(
-                        active_idx,
+                        active_slot,
                     )))
             {
-                entry.unpaused_by = Some(admin.clone());
-                entry.unpaused_at = Some(now);
-                env.storage().instance().set(
-                    &DataKey::Config(ConfigKey::PauseHistoryEntry(active_idx)),
-                    &entry,
-                );
+                // The slot is recycled once the entry falls out of the
+                // rolling window; never mutate a different function's entry.
+                if entry.function_name == global_key {
+                    entry.unpaused_by = Some(admin.clone());
+                    entry.unpaused_at = Some(now);
+                    env.storage().instance().set(
+                        &DataKey::Config(ConfigKey::PauseHistoryEntry(active_slot)),
+                        &entry,
+                    );
+                }
             }
             env.storage()
                 .instance()
@@ -7948,8 +7961,11 @@ impl EscrowContract {
             unpaused_at: None,
             reason: reason.clone(),
         };
+        // Circular buffer: reuse the slot of the oldest entry once the
+        // retention limit is reached, so history storage stays bounded.
+        let slot = Self::pause_history_slot(history_count);
         env.storage().instance().set(
-            &DataKey::Config(ConfigKey::PauseHistoryEntry(history_count)),
+            &DataKey::Config(ConfigKey::PauseHistoryEntry(slot)),
             &entry,
         );
         env.storage().instance().set(
@@ -8015,19 +8031,24 @@ impl EscrowContract {
                 function_name.clone(),
             )))
         {
+            let active_slot = Self::pause_history_slot(active_idx);
             if let Some(mut entry) =
                 env.storage()
                     .instance()
                     .get::<DataKey, PauseHistory>(&DataKey::Config(ConfigKey::PauseHistoryEntry(
-                        active_idx,
+                        active_slot,
                     )))
             {
-                entry.unpaused_by = Some(admin.clone());
-                entry.unpaused_at = Some(now);
-                env.storage().instance().set(
-                    &DataKey::Config(ConfigKey::PauseHistoryEntry(active_idx)),
-                    &entry,
-                );
+                // The slot is recycled once the entry falls out of the
+                // rolling window; never mutate a different function's entry.
+                if entry.function_name == function_name {
+                    entry.unpaused_by = Some(admin.clone());
+                    entry.unpaused_at = Some(now);
+                    env.storage().instance().set(
+                        &DataKey::Config(ConfigKey::PauseHistoryEntry(active_slot)),
+                        &entry,
+                    );
+                }
             }
             env.storage()
                 .instance()
@@ -8057,23 +8078,18 @@ impl EscrowContract {
     /// Panics if required state is missing.
     pub fn get_pause_history(env: Env, limit: u32, offset: u32) -> Vec<PauseHistory> {
         let mut result = Vec::new(&env);
-        let total: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::PauseHistoryCount))
-            .unwrap_or(0);
-        if limit == 0 || (offset as u64) >= total {
+        let (window_start, window_end) = Self::pause_history_window(&env);
+        let retained = window_end - window_start;
+        if limit == 0 || (offset as u64) >= retained {
             return result;
         }
-        let start = offset as u64;
-        let end = core::cmp::min(start.saturating_add(limit as u64), total);
+        let start = window_start + offset as u64;
+        let end = core::cmp::min(start.saturating_add(limit as u64), window_end);
         let mut i = start;
         while i < end {
-            if let Some(entry) = env
-                .storage()
-                .instance()
-                .get::<DataKey, PauseHistory>(&DataKey::Config(ConfigKey::PauseHistoryEntry(i)))
-            {
+            if let Some(entry) = env.storage().instance().get::<DataKey, PauseHistory>(
+                &DataKey::Config(ConfigKey::PauseHistoryEntry(Self::pause_history_slot(i))),
+            ) {
                 result.push_back(entry);
             }
             i += 1;
@@ -8094,18 +8110,12 @@ impl EscrowContract {
     /// Panics if required state is missing.
     pub fn get_function_pause_history(env: Env, function_name: String) -> Vec<PauseHistory> {
         let mut result = Vec::new(&env);
-        let total: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::PauseHistoryCount))
-            .unwrap_or(0);
-        let mut i = 0u64;
-        while i < total {
-            if let Some(entry) = env
-                .storage()
-                .instance()
-                .get::<DataKey, PauseHistory>(&DataKey::Config(ConfigKey::PauseHistoryEntry(i)))
-            {
+        let (window_start, window_end) = Self::pause_history_window(&env);
+        let mut i = window_start;
+        while i < window_end {
+            if let Some(entry) = env.storage().instance().get::<DataKey, PauseHistory>(
+                &DataKey::Config(ConfigKey::PauseHistoryEntry(Self::pause_history_slot(i))),
+            ) {
                 if entry.function_name == function_name {
                     result.push_back(entry);
                 }
@@ -8113,6 +8123,28 @@ impl EscrowContract {
             i += 1;
         }
         result
+    }
+
+    /// Returns the storage slot used for an absolute pause-history index.
+    ///
+    /// Pause history is kept in a fixed-size circular buffer: entry `n` is
+    /// stored under `PauseHistoryEntry(n % PAUSE_HISTORY_LIMIT)`, so recording
+    /// entry `n + PAUSE_HISTORY_LIMIT` overwrites the oldest retained entry.
+    fn pause_history_slot(index: u64) -> u64 {
+        index % PAUSE_HISTORY_LIMIT
+    }
+
+    /// Returns the half-open range `[start, end)` of absolute pause-history
+    /// indices currently retained in storage. `end` is the total number of
+    /// pause events ever recorded and `start` is clamped so that at most
+    /// `PAUSE_HISTORY_LIMIT` entries are exposed.
+    fn pause_history_window(env: &Env) -> (u64, u64) {
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::PauseHistoryCount))
+            .unwrap_or(0);
+        (total.saturating_sub(PAUSE_HISTORY_LIMIT), total)
     }
 
     /// Returns pause state.
@@ -11640,8 +11672,8 @@ mod verification_test;
 // #[cfg(test)]
 // mod multi_party_dispute_test;
 //
-// #[cfg(test)]
-// mod pause_history_test;
+#[cfg(test)]
+mod pause_history_test;
 //
 #[cfg(test)]
 mod expiry_test;
