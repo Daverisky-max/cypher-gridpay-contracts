@@ -1155,6 +1155,10 @@ pub struct CircuitBreakerConfig {
     pub measurement_window_seconds: u64,
     pub cooldown_seconds: u64,
     pub enabled: bool,
+    // Issue #59: absolute rolling refund volume threshold within the
+    // measurement window. `0` disables the absolute-volume check and leaves
+    // only the rate-based (`max_refund_rate_bps`) trip condition active.
+    pub max_refund_volume: i128,
 }
 
 #[derive(Clone)]
@@ -6549,7 +6553,12 @@ impl RefundContract {
 
         let rate_bps = ((new_refund_vol * 10000) / new_payment_vol) as u32;
 
-        if rate_bps > config.max_refund_rate_bps {
+        // Issue #59: trip on absolute rolling refund volume exceeding the
+        // configured threshold, independent of the rate-based check above.
+        let volume_exceeded =
+            config.max_refund_volume > 0 && new_refund_vol > config.max_refund_volume;
+
+        if rate_bps > config.max_refund_rate_bps || volume_exceeded {
             state.tripped = true;
             state.tripped_at = Some(now);
             state.trip_count += 1;
