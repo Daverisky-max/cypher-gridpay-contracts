@@ -324,6 +324,10 @@ pub enum ExtError {
     // Issue #389: two-step admin rotation errors
     NoPendingAdmin = 59,
     NotPendingAdmin = 60,
+    // Issue #70: cross-contract payment-state verification errors
+    PaymentContractCallFailed = 61,
+    PaymentNotCompleted = 62,
+    PaymentContractUnavailable = 63,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1012,6 +1016,53 @@ pub struct GlobalRefundRateLimit {
     pub next_max_requests_per_window: u32,
     pub next_window_seconds: u64,
     pub next_config_effective_at: u64,
+}
+
+/// Issue #70: mirror of `payments::PaymentVerification`.
+///
+/// The refund contract does not depend on the payments crate, so this repeats
+/// the wire format exactly: `#[contracttype]` structs encode as
+/// `Map<Symbol(field_name), Val>`, so matching field names and types is all that
+/// is required for the two types to interoperate. Kept primitive-only for the
+/// same reason - there is no `PaymentStatus` to fall out of sync.
+///
+/// `test_cross_contract.rs` asserts this mirror stays byte-compatible with the
+/// payment contract's own type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct PaymentContractVerification {
+    /// `false` when the payment contract is paused and therefore cannot vouch
+    /// for any state.
+    pub payment_contract_available: bool,
+    /// The payment ID resolves to a stored payment.
+    pub exists: bool,
+    /// The stored payment's status is `Completed`.
+    pub is_completed: bool,
+    /// The stored payment belongs to the queried customer.
+    pub owned_by_customer: bool,
+}
+
+/// Issue #70: result of verifying payment-contract state before a cross-contract
+/// refund. Every field is a primitive so the refund contract can never fail to
+/// decode a response because the payment contract's schema moved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct PaymentStateVerification {
+    /// A payment contract address is configured for this refund contract.
+    pub payment_contract_configured: bool,
+    /// The cross-contract call completed without error.
+    pub payment_contract_reachable: bool,
+    /// The payment contract reports it is not paused and able to answer.
+    pub payment_contract_available: bool,
+    /// The payment ID resolves to a stored payment.
+    pub payment_exists: bool,
+    /// The payment status is `Completed`.
+    pub payment_completed: bool,
+    /// The payment belongs to the customer being refunded.
+    pub owned_by_customer: bool,
+    /// `payment_exists && payment_completed && owned_by_customer` and the
+    /// payment contract was reachable and available.
+    pub refundable: bool,
 }
 
 /// Configuration for platform fee deduction on refund processing
@@ -5731,34 +5782,145 @@ impl RefundContract {
 
     /// Verify that a customer owns a given payment via a cross-contract call.
     ///
+    /// Retained as a boolean convenience wrapper over
+    /// [`verify_payment_state`](Self::verify_payment_state) for existing
+    /// integrations. Any failure - the payment contract being unset, unreachable,
+    /// paused, or reporting a non-`Completed` payment - is reported as `false`,
+    /// which is fail-closed. Callers that need to distinguish *why* should use
+    /// `verify_payment_state`.
+    ///
     /// # Arguments
     /// * `payment_id` - The payment ID to verify.
     /// * `customer` - The customer address to verify ownership for.
     ///
     /// # Returns
-    /// `true` if the payment exists, belongs to the customer, and is completed.
-    /// Returns `false` if no payment contract is set or verification fails.
+    /// `true` only when the payment contract confirms the payment exists, is
+    /// `Completed`, and belongs to `customer`.
     pub fn verify_payment_ownership(env: Env, payment_id: u64, customer: Address) -> bool {
-        let payment_contract: Address = match env
+        Self::verify_payment_state(env, payment_id, customer)
+            .map(|v| v.refundable)
+            .unwrap_or(false)
+    }
+
+    /// Verifies payment-contract state before a cross-contract refund (#70).
+    ///
+    /// Calls `get_payment_verification` on the configured payment contract and
+    /// reports each precondition separately, so a caller can tell "the payment
+    /// contract could not be reached" apart from "the payment is not complete".
+    ///
+    /// # Arguments
+    /// * `payment_id` - The payment ID to verify.
+    /// * `customer` - The customer the refund would be paid to.
+    ///
+    /// # Returns
+    /// `Ok(PaymentStateVerification)` when the payment contract answered (or is
+    /// simply not configured, in which case `payment_contract_configured` is
+    /// `false` and verification is skipped for backward compatibility).
+    ///
+    /// # Errors
+    /// Returns `PaymentContractCallFailed` when the cross-contract invocation
+    /// itself failed - the address is not a contract, the function is missing, or
+    /// the call reverted. This is distinct from a successful `false` answer: a
+    /// failed call means the refund contract could not establish payment state,
+    /// and it must fail safely rather than assume the worst.
+    pub fn verify_payment_state(
+        env: Env,
+        payment_id: u64,
+        customer: Address,
+    ) -> Result<PaymentStateVerification, Error> {
+        let payment_contract: Option<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::PaymentContractAddress)
-        {
+            .get(&DataKey::PaymentContractAddress);
+
+        let payment_contract = match payment_contract {
+            // Backward compatible: with no payment contract configured there is
+            // nothing to verify against.
+            None => {
+                return Ok(PaymentStateVerification {
+                    payment_contract_configured: false,
+                    payment_contract_reachable: false,
+                    payment_contract_available: false,
+                    payment_exists: false,
+                    payment_completed: false,
+                    owned_by_customer: false,
+                    refundable: false,
+                });
+            }
             Some(addr) => addr,
-            None => return false, // no contract set → skip verification
         };
-        // Cross-contract call to payment_contract.check_payment_customer(payment_id, customer).
-        // That function returns bool: true if payment exists, belongs to customer, and is Completed.
-        let func = Symbol::new(&env, "check_payment_customer");
+
+        let func = Symbol::new(&env, "get_payment_verification");
         let args = (payment_id, customer).into_val(&env);
-        match env.try_invoke_contract::<bool, soroban_sdk::InvokeError>(
-            &payment_contract,
-            &func,
-            args,
-        ) {
-            Ok(Ok(result)) => result,
-            _ => false,
+        let raw = env
+            .try_invoke_contract::<PaymentContractVerification, soroban_sdk::InvokeError>(
+                &payment_contract,
+                &func,
+                args,
+            )
+            .map_err(|_| Error::Ext(ExtError::PaymentContractCallFailed))?;
+
+        let verification: PaymentContractVerification =
+            raw.map_err(|_| Error::Ext(ExtError::PaymentContractCallFailed))?;
+
+        let refundable = verification.payment_contract_available
+            && verification.exists
+            && verification.is_completed
+            && verification.owned_by_customer;
+
+        Ok(PaymentStateVerification {
+            payment_contract_configured: true,
+            payment_contract_reachable: true,
+            payment_contract_available: verification.payment_contract_available,
+            payment_exists: verification.exists,
+            payment_completed: verification.is_completed,
+            owned_by_customer: verification.owned_by_customer,
+            refundable,
+        })
+    }
+
+    /// Internal gate used before a refund is recorded or paid out (#70).
+    ///
+    /// Fails with a specific error for each broken precondition so merchants get
+    /// an actionable code instead of a generic mismatch:
+    /// - the payment contract could not be reached -> `PaymentContractCallFailed`
+    /// - the payment contract is paused -> `PaymentContractUnavailable`
+    /// - no such payment -> `InvalidPaymentId`
+    /// - status is not `Completed` (or already refunded) -> `PaymentNotCompleted`
+    /// - the payment belongs to someone else -> `PaymentOwnershipMismatch`
+    ///
+    /// `allow_refunded` is `true` on the payout path: once a payment has been
+    /// (partially) refunded its status legitimately leaves `Completed`, and
+    /// `can_refund_payment` already bounds the remaining amount.
+    fn require_payment_state(
+        env: &Env,
+        payment_id: u64,
+        customer: &Address,
+        allow_refunded: bool,
+    ) -> Result<(), Error> {
+        let verification = Self::verify_payment_state(env.clone(), payment_id, customer.clone())?;
+        if !verification.payment_contract_configured {
+            return Ok(());
         }
+        if !verification.payment_contract_reachable {
+            return Err(Error::Ext(ExtError::PaymentContractCallFailed));
+        }
+        if !verification.payment_contract_available {
+            return Err(Error::Ext(ExtError::PaymentContractUnavailable));
+        }
+        if !verification.payment_exists {
+            return Err(Error::Core(CoreError::InvalidPaymentId));
+        }
+        if !verification.owned_by_customer {
+            return Err(Error::Core(CoreError::PaymentOwnershipMismatch));
+        }
+        // Issue #70: a refund may only be recorded against a settled payment. On
+        // the payout path an already-refunded payment is acceptable, because
+        // issuing the refund is what moved it out of `Completed`.
+        if !verification.payment_completed && !allow_refunded {
+            return Err(Error::Ext(ExtError::PaymentNotCompleted));
+        }
+        Ok(())
     }
 
     fn create_refund(
@@ -5788,17 +5950,13 @@ impl RefundContract {
             return Err(Error::Core(CoreError::InvalidPaymentId));
         }
 
-        if env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::PaymentContractAddress)
-            .is_some()
-        {
-            let owned = Self::verify_payment_ownership(env.clone(), payment_id, customer.clone());
-            if !owned {
-                return Err(Error::Core(CoreError::PaymentOwnershipMismatch));
-            }
-        }
+        // Issue #70: verify payment-contract state before recording a refund.
+        // Replaces the previous boolean `check_payment_customer` call, which
+        // collapsed "contract unreachable", "payment not found", "payment not
+        // completed" and "wrong customer" into one indistinguishable `false`.
+        // Skipped entirely when no payment contract is configured, preserving
+        // the original backward-compatible behaviour.
+        Self::require_payment_state(&env, payment_id, &customer, false)?;
 
         Self::can_refund_payment(&env, payment_id, amount, original_payment_amount)?;
         Self::check_and_update_circuit_breaker(&env, amount, original_payment_amount)?;
@@ -6027,6 +6185,14 @@ impl RefundContract {
         if refund.status != RefundStatus::Approved {
             return Err(Error::Core(CoreError::InvalidStatus));
         }
+
+        // Issue #70: re-verify payment state immediately before money moves. A
+        // refund can sit in `Approved` for a long time (arbitration, appeal,
+        // batch processing), during which the payment contract may have been
+        // paused or the payment state changed. `allow_refunded` is `true` here
+        // because a payment that already carries a refund legitimately left
+        // `Completed`; `can_refund_payment` below still bounds the amount.
+        Self::require_payment_state(env, refund.payment_id, &refund.customer, true)?;
 
         Self::can_refund_payment(
             env,
