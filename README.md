@@ -117,3 +117,8 @@ Recommended migration path:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-22 -->
+- #22: payment: Validate token contract address against whitelist in create_payment
