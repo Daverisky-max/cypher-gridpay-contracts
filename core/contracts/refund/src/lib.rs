@@ -234,79 +234,129 @@ pub enum RefundReasonCode {
 // single `Error` type so every existing `Result<_, Error>` signature and `?`
 // call site is unaffected. Mirrors the same pattern already used for
 // `Error`/`BasicError`/`EscrowError`/`ActionError` in contracts/escrow/src/lib.rs.
+/// Core refund request validation, policy inheritance, and execution errors.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CoreError {
+    /// Refund amount is zero or negative. Resolution: supply refund amount greater than zero.
     InvalidAmount = 1,
+    /// Refund request ID not found in storage. Resolution: verify refund request ID.
     RefundNotFound = 2,
+    /// Caller is not authorized for this refund operation. Resolution: invoke with merchant, buyer, or admin signature.
     Unauthorized = 3,
+    /// Referenced payment ID does not exist or is malformed. Resolution: verify payment ID against payment contract.
     InvalidPaymentId = 4,
+    /// Refund request is in an invalid status for this operation. Resolution: check current refund status before acting.
     InvalidStatus = 7,
+    /// Refund request has already been processed or resolved. Resolution: no-op; refund already completed.
     AlreadyProcessed = 8,
+    /// Requested refund exceeds total original payment amount. Resolution: request amount <= original payment.
     RefundExceedsPayment = 9,
+    /// Cumulative refunds for this payment exceed total payment amount. Resolution: ensure total refunds <= payment.
     TotalRefundsExceedPayment = 10,
+    /// Time allowed for requesting a refund has elapsed. Resolution: file dispute or appeal if within appeal window.
     RefundWindowExpired = 11,
+    /// Refund amount exceeds the maximum allowed by merchant policy. Resolution: adjust refund under policy cap.
     RefundExceedsPolicy = 12,
+    /// Refund policy configuration not found for merchant. Resolution: register policy via set_merchant_policy().
     PolicyNotFound = 13,
+    /// Merchant refund policy is currently deactivated. Resolution: activate policy before processing requests.
     PolicyInactive = 14,
+    /// Required arbitrator quorum threshold not reached. Resolution: gather additional arbitrator votes.
     QuorumNotReached = 15,
+    /// Caller is not a registered dispute arbitrator. Resolution: invoke using authorized arbitrator address.
     NotArbitrator = 16,
+    /// Refund contract is currently paused by admin. Resolution: wait for admin to resume contract operations.
     ContractPaused = 17,
+    /// Specific refund entry point is currently paused. Resolution: wait for function to be unpaused.
     FunctionPaused = 18,
+    /// Dispute response timeout has not passed yet. Resolution: wait until timeout deadline expires before escalating.
     CaseNotTimedOut = 19,
+    /// Batch refund array size exceeds maximum permitted items. Resolution: submit batch with fewer items.
     BatchRefundTooLarge = 20,
-    // Issue #138: Refund policy inheritance errors
+    /// Circular dependency detected in refund policy inheritance chain. Resolution: fix parent policy references.
     CircularInheritance = 21,
+    /// Policy inheritance chain exceeds maximum nesting depth. Resolution: flatten policy inheritance hierarchy.
     MaxInheritanceDepth = 22,
+    /// Cannot appeal a refund request that was not rejected. Resolution: appeals only valid for rejected requests.
     RefundNotRejected = 23,
+    /// Appeal submission window has expired. Resolution: appeals must be filed within appeal_window_seconds.
     AppealWindowExpired = 24,
+    /// An appeal has already been filed for this refund request. Resolution: cannot file multiple appeals on one request.
     AppealAlreadyFiled = 25,
+    /// Rate limit reached for refund requests. Resolution: wait until rate limit period resets before submitting.
     RefundRateLimitExceeded = 26,
+    /// Linked payment contract address is unconfigured. Resolution: set payment contract address via admin entry point.
     PaymentContractNotSet = 27,
+    /// Caller does not own the payment being refunded. Resolution: invoke using payment payer or merchant address.
     PaymentOwnershipMismatch = 28,
+    /// Circuit breaker tripped due to excessive refund volume. Resolution: review alerts and reset circuit breaker.
     CircuitBreakerTripped = 29,
+    /// Protocol fee basis points configuration is invalid. Resolution: provide fee bps between 0 and 10,000.
     InvalidFeeConfig = 30,
+    /// Treasury fees collected are insufficient for requested operation. Resolution: ensure adequate accumulated fees.
     InsufficientTreasuryFees = 31,
+    /// Automated approval threshold exceeds protocol ceiling. Resolution: lower auto-approve threshold below ceiling.
     AutoApproveThresholdExceedsCeiling = 32,
+    /// Mandatory cooldown period between customer refunds is active. Resolution: wait until cooldown period elapses.
     RefundCooldownActive = 33,
 }
 
+/// Extended refund features: hooks, vouchers, eligibility, fraud detection, and admin rotation.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExtError {
+    /// Arbitrator address not found in registered arbitrator list. Resolution: register arbitrator before assigning cases.
     ArbitratorNotFound = 34,
+    /// Minimum score threshold for automated risk assessment is invalid. Resolution: specify threshold within 0-100.
     InvalidScoreThreshold = 35,
+    /// Automated refund rule trigger not found. Resolution: configure auto-refund rule before triggering.
     AutoRefundTriggerNotFound = 36,
+    /// An identical automated refund trigger is already registered. Resolution: cannot register duplicate trigger.
     DuplicateAutoRefundTrigger = 37,
+    /// Address is flagged on fraud detection watchlist. Resolution: address blocked pending fraud clearance.
     AddressFlaggedForFraud = 38,
+    /// Fraud signal record for transaction not found. Resolution: register fraud signal before evaluation.
     FraudSignalNotFound = 40,
-    // Issue #144: Notification hook errors
+    /// Notification hook subscriber not found. Resolution: subscribe hook before triggering events.
     HookNotFound = 41,
+    /// Maximum number of hooks registered for this event reached. Resolution: remove unused hooks before adding new.
     MaxHooksPerEventReached = 42,
+    /// Caller does not own the registered notification hook. Resolution: only hook owner can manage hook.
     HookNotOwnedBySubscriber = 43,
-    // Issue #373: Invalid notification hook subscriber address
-    // (moved from 58, which collided with SchemaAlreadyAtTarget)
+    /// Hook callback contract address is invalid. Resolution: provide valid contract address for notification hook.
     InvalidHookAddress = 51,
-    // Issue #148: Customer eligibility errors
+    /// Customer account is blocked from receiving refunds. Resolution: resolve customer block via merchant support.
     CustomerBlockedFromRefund = 44,
+    /// Customer eligibility entry not found in whitelist. Resolution: register customer eligibility record.
     EligibilityEntryNotFound = 45,
+    /// Refund template identifier not found in registry. Resolution: create template via create_template() first.
     TemplateNotFound = 46,
+    /// Refund template is currently deactivated. Resolution: activate template before instantiation.
     TemplateInactive = 47,
-    // Issue #XXX: Payment refund cap errors
+    /// Total count of refunds for this payment reached configured cap. Resolution: cannot issue further refunds.
     RefundCountCapExceeded = 48,
+    /// Total refund amount for this payment reached configured cap. Resolution: cannot exceed payment refund ceiling.
     RefundAmountCapExceeded = 49,
+    /// Refund token is not supported by contract asset registry. Resolution: refund in original payment token.
     UnsupportedRefundToken = 50,
-    // New specific errors
+    /// Store credit or refund voucher ID not found. Resolution: verify voucher ID before redeeming.
     VoucherNotFound = 52,
+    /// Store credit voucher has expired past its validity timestamp. Resolution: cannot redeem expired voucher.
     VoucherExpired = 53,
+    /// Store credit voucher has already been redeemed. Resolution: cannot redeem voucher more than once.
     VoucherAlreadyRedeemed = 54,
+    /// Evidence for this dispute has already been submitted by party. Resolution: evidence submission is final.
     EvidenceAlreadySubmitted = 55,
+    /// Dispute case has already been escalated to senior arbitration. Resolution: await senior arbitrator ruling.
     CaseAlreadyEscalated = 56,
-    // Issue #370: Customer tier policy errors
+    /// Tier-specific refund policy not found for customer tier. Resolution: configure tier policy before evaluation.
     TierPolicyNotFound = 57,
+    /// Storage schema is already at or above target version. Resolution: specify newer version for migration.
     SchemaAlreadyAtTarget = 58,
-    // Issue #389: two-step admin rotation errors
+    /// No pending administrator address in two-step rotation process. Resolution: initiate nomination via nominate_admin().
     NoPendingAdmin = 59,
+    /// Caller is not the nominated pending administrator. Resolution: accept_admin() must be called by nominee.
     NotPendingAdmin = 60,
 }
 

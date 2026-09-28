@@ -114,154 +114,278 @@ pub enum DataKey {
     State(StateDataKey),
 }
 
+/// Protocol-level administrative and execution errors for PaymentContract.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum BasicError {
+    /// Caller is not authorized to invoke this entry point. Resolution: invoke with required admin/signer signature.
     Unauthorized = 100,
+    /// Provided metadata exceeds the maximum permitted byte length. Resolution: reduce metadata size under threshold.
     MetadataTooLarge = 101,
+    /// Transaction notes exceed allowed string length. Resolution: shorten notes content.
     NotesTooLarge = 102,
+    /// Specified currency is invalid or unsupported. Resolution: use supported currency (USDC, XLM, EURC).
     InvalidCurrency = 103,
+    /// Batch array size is zero or exceeds maximum batch limit. Resolution: submit batches between 1 and max limit.
     InvalidBatchSize = 104,
+    /// One or more items in the batch failed processing. Resolution: inspect individual item statuses and retry failed items.
     BatchPartialFailure = 105,
+    /// Rate limit reached for caller within the current window. Resolution: wait until the rate limit window resets.
     RateLimitExceeded = 106,
+    /// Transaction would exceed daily aggregate volume limit. Resolution: request limit increase or wait for the next day.
     DailyVolumeExceeded = 107,
+    /// Target address is flagged on the compliance/sanctions list. Resolution: unflag address via admin compliance review.
     AddressFlagged = 108,
+    /// Address is already on the flagged list. Resolution: no-op; address is already flagged.
     AddressAlreadyFlagged = 109,
+    /// Payment amount exceeds per-transaction ceiling. Resolution: lower payment amount or request ceiling adjustment.
     AmountExceedsLimit = 110,
+    /// Multi-signature configuration has not been initialized. Resolution: call initialize() before administrative actions.
     MultiSigNotInitialized = 111,
+    /// Admin count is below the minimum required signatures threshold. Resolution: add additional admins.
     InsufficientAdmins = 112,
+    /// Caller is not a registered admin in MultiSigConfig. Resolution: invoke using an authorized multi-sig admin address.
     NotAnAdmin = 113,
+    /// Admin has already approved this proposal. Resolution: wait for remaining admins to submit approvals.
     AlreadyApproved = 114,
+    /// External price oracle invocation failed or panicked. Resolution: verify oracle contract availability and interface.
     OracleCallFailed = 115,
+    /// Contract is currently paused by an administrator. Resolution: resume contract via unpause_contract().
     ContractPaused = 116,
+    /// The specific contract function invoked is paused. Resolution: resume function via unpause_function().
     FunctionPaused = 117,
+    /// Configured volume thresholds for fee tiers are non-monotonic. Resolution: ensure Tier 1 < Tier 2 < Tier 3 thresholds.
     InvalidTierThresholds = 118,
+    /// Oracle price feed timestamp is older than maximum permitted latency. Resolution: update oracle price feed before retry.
     OracleFeedStale = 119,
+    /// No price oracle address configured for this currency pair. Resolution: configure oracle via set_oracle_config().
     OracleNotConfigured = 120,
+    /// Payment or sweep amount must be strictly positive. Resolution: supply an amount greater than zero.
     InvalidAmount = 121,
+    /// Customer verification level record not found in storage. Resolution: register customer verification level first.
     VerificationLevelNotFound = 122,
+    /// Limits for the customer's fee tier are unconfigured. Resolution: configure tier limits before processing.
     TierLimitsNotConfigured = 123,
+    /// Rolling window interval must be positive and within valid range. Resolution: supply positive interval in seconds.
     InvalidInterval = 124,
+    /// Fee or share basis points exceed 10,000 (100%). Resolution: supply basis points between 0 and 10,000.
     InvalidBps = 125,
+    /// Contract storage schema is already at or above the target migration version. Resolution: specify newer version.
     SchemaAlreadyAtTarget = 126,
 }
 
+/// Errors relating to payment lifecycle, settlement, and scheduling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum PaymentError {
+    /// Payment ID was not found in storage. Resolution: verify payment ID before invoking operations.
     NotFound = 200,
+    /// Payment is in an invalid status for the requested transition. Resolution: ensure payment is in expected status (Pending, etc.).
     InvalidStatus = 201,
+    /// Payment has already been finalized or refunded. Resolution: no-op; payment is already settled.
     AlreadyProcessed = 202,
+    /// Payment timestamp has passed its expiration deadline. Resolution: create a new payment request.
     Expired = 203,
+    /// Payment has not reached its expiration deadline yet. Resolution: wait until expires_at timestamp has elapsed.
     NotExpired = 204,
+    /// Payment was created without an expiration deadline. Resolution: specify non-zero expires_at if expiry logic is needed.
     NoExpiration = 205,
+    /// Underlying token transfer invocation failed. Resolution: check token balance and allowance authorizations.
     TransferFailed = 206,
+    /// Refund amount exceeds original payment total. Resolution: specify a refund amount less than or equal to payment amount.
     RefundExceedsPayment = 207,
+    /// Scheduled payment execution attempted before due date. Resolution: wait until scheduled execution timestamp is reached.
     NotYetDue = 208,
+    /// Scheduled payment has been cancelled by the payer. Resolution: recreate schedule if payment should proceed.
     ScheduledPaymentCancelled = 209,
+    /// Metadata hash or URI was already registered for this payment. Resolution: metadata is immutable once set.
     MetadataAlreadySet = 210,
+    /// Requested metadata key or record not found. Resolution: attach metadata via attach_metadata() before reading.
     MetadataNotFound = 211,
+    /// Computed metadata hash does not match provided expected hash. Resolution: verify metadata content integrity.
     HashMismatch = 212,
+    /// Installment payment cannot be made on fully settled balance. Resolution: no-op; balance is zero.
     AlreadyFullyPaid = 213,
+    /// Installment amount exceeds outstanding unpaid balance. Resolution: reduce installment amount to remaining balance.
     InstallmentExceedsRemaining = 214,
+    /// Partial payment record for this payment ID not found. Resolution: verify partial payment plan initialization.
     PartialPaymentNotFound = 215,
+    /// Merchant transaction velocity limit exceeded. Resolution: wait for merchant velocity window to reset.
     MerchantRateLimitExceeded = 216,
+    /// Merchant volume limit exceeded for current period. Resolution: wait for volume window reset or upgrade tier.
     AmountRateLimitExceeded = 217,
+    /// Payout schedule configuration record not found. Resolution: configure payout schedule before execution.
     PayoutScheduleNotFound = 218,
+    /// Milestone or scheduled payout timestamp is in the future. Resolution: wait until payout due date arrives.
     PayoutNotYetDue = 219,
+    /// No accumulated balance available for settlement. Resolution: ensure transactions have generated settleable volume.
     NothingToSettle = 220,
+    /// Arithmetic overflow occurred during billing calculation. Resolution: check item price and quantity inputs.
     BillingOverflow = 221,
+    /// Line item description or quantity is invalid. Resolution: provide positive unit price and valid quantity.
     InvalidLineItem = 222,
+    /// Scheduled execution timestamp is in the past or exceeds maximum horizon. Resolution: provide future schedule timestamp.
     InvalidScheduleTime = 223,
+    /// Specified token is not on the contract's allowed asset list. Resolution: register token via admin add_allowed_token().
     TokenNotAllowed = 224,
 }
 
+/// Errors relating to recurring subscription plans, dunning cycles, and billing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum SubscriptionError {
+    /// Subscription record was not found in storage. Resolution: verify subscription ID before executing operations.
     NotFound = 300,
-    NotActive = 301,
+    /// Subscription is not active (paused, cancelled, or expired). Resolution: resume or renew subscription first.
     PaymentNotDue = 302,
+    /// Subscription charge attempted before the scheduled billing cycle date. Resolution: wait until next billing timestamp.
+    NotActive = 301,
+    /// Maximum permitted failed payment retry attempts reached. Resolution: cancel subscription or update payment method.
     MaxRetriesExceeded = 303,
+    /// Subscription has reached its end timestamp or termination condition. Resolution: create a new subscription if desired.
     Ended = 304,
+    /// Dunning record for tracking failed payment retries not found. Resolution: initialize dunning process on failed payment.
     DunningNotFound = 305,
+    /// Operation requires active dunning status, but subscription is healthy. Resolution: verify subscription dunning status.
     NotInDunning = 306,
+    /// Next automated retry attempt is not yet due. Resolution: wait until retry_interval has elapsed.
     RetryNotDue = 307,
+    /// Dunning grace period expired without successful payment recovery. Resolution: cancel subscription and notify customer.
     GracePeriodExpired = 308,
+    /// Payment retry attempted sooner than backoff interval allows. Resolution: obey retry backoff interval.
     RetryTooEarly = 309,
+    /// Metered billing configuration record not found. Resolution: initialize metered subscription parameters first.
     MeteredNotFound = 310,
+    /// Invoiced usage or charge would breach configured billing cap. Resolution: increase billing cap or throttle usage.
     BillingCapExceeded = 311,
+    /// Subscription group ID not found in storage. Resolution: register subscription group before adding members.
     GroupNotFound = 312,
+    /// Customer is already a member of this subscription group. Resolution: cannot add duplicate member to group.
     AlreadyInGroup = 313,
+    /// Subscription group has reached its maximum permitted member capacity. Resolution: upgrade group tier or remove members.
     GroupSizeLimitExceeded = 314,
+    /// Free trial period has elapsed and requires standard billing activation. Resolution: convert to paid subscription plan.
     TrialExpired = 315,
+    /// Requested trial duration exceeds protocol maximum trial period. Resolution: configure trial duration within allowed bounds.
     MaxTrialDurationExceeded = 316,
+    /// The merchant for this subscription is currently paused. Resolution: unpause merchant before charging subscribers.
     MerchantPaused = 317,
+    /// Metered subscription units consumed exceed period usage cap. Resolution: reset billing period or increase unit cap.
     UsageCapExceeded = 318,
 }
 
+/// Errors relating to multi-sig administrative proposals and voting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum ProposalError {
+    /// Proposal ID was not found in storage. Resolution: verify proposal ID or create a new proposal.
     NotFound = 400,
+    /// Proposal has passed its expiration deadline (proposal_ttl). Resolution: re-propose with a fresh proposal window.
     Expired = 401,
+    /// Proposal has already been executed on-chain. Resolution: no-op; proposal action is already completed.
     AlreadyExecuted = 402,
+    /// Required approval threshold not reached among admins. Resolution: collect remaining required admin signatures.
     ThresholdNotMet = 403,
+    /// Action amount or sensitivity requires multi-sig proposal workflow. Resolution: submit proposal via propose_admin_action().
     RequiresMultiSig = 404,
+    /// Total approvals collected is less than required multi-sig threshold. Resolution: wait for remaining admin approvals.
     InsufficientApprovals = 405,
+    /// Proposal is no longer valid due to ledger timestamp exceeding expires_at. Resolution: submit new proposal.
     ProposalExpired = 406,
 }
 
+/// Errors relating to specialized features (escrow bridging, payment channels, split payouts, loyalty, limits).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum FeatureError {
+    /// Associated escrow contract mapping not found. Resolution: set escrow contract address via set_escrow_contract().
     EscrowMappingNotFound = 500,
+    /// Cross-contract invocation to EscrowContract failed. Resolution: check escrow contract state and permissions.
     EscrowBridgeFailed = 501,
+    /// Platform fee configuration is missing. Resolution: initialize fee config via set_fee_config().
     FeeConfigNotFound = 502,
+    /// Accumulated protocol fees are insufficient for the requested sweep. Resolution: verify sweepable balance before sweeping.
     InsufficientFees = 503,
+    /// Condition predicate evaluated to false. Resolution: ensure condition prerequisite is met.
     ConditionNotMet = 504,
+    /// Conditional escrow rule has already been evaluated. Resolution: cannot re-evaluate finalized condition.
     ConditionAlreadyEvaluated = 505,
+    /// Automatic escrow triggering rule not found. Resolution: register auto-escrow rule before processing payment.
     AutoEscrowRuleNotFound = 506,
+    /// Payment amount is below the auto-escrow trigger threshold. Resolution: payment processed directly without escrow.
     AutoEscrowBelowMinimum = 507,
+    /// Auto-escrow rule has already been triggered for this payment. Resolution: no-op; escrow already initiated.
     AutoEscrowAlreadyTriggered = 508,
+    /// Oracle runtime failure during condition evaluation. Resolution: check oracle feed connectivity.
     ConditionEvaluationFailed = 509,
+    /// Runtime condition parameter check failed. Resolution: verify condition parameters match required criteria.
     ConditionRuntimeNotMet = 510,
+    /// Fee basis points exceed maximum allowed bps (10,000). Resolution: configure valid fee basis points.
     InvalidFeeConfig = 511,
+    /// Payment channel ID not found in storage. Resolution: verify channel ID or open channel before settling.
     ChannelNotFound = 512,
+    /// Cryptographic signature verification failed on payment channel update. Resolution: provide valid Ed25519 signature.
     InvalidSignature = 513,
+    /// Channel sequence number is not strictly greater than current settled nonce. Resolution: increment off-chain nonce.
     InvalidNonce = 514,
+    /// Payment channel is already closed and cannot be settled again. Resolution: open a new channel if needed.
     ChannelClosed = 515,
+    /// Payment channel has expired and can only be closed for customer refund. Resolution: close expired channel.
     ChannelExpired = 516,
+    /// Attempted close_channel_expired on an active channel before its expiry. Resolution: wait until expires_at passes.
     ChannelNotExpired = 517,
+    /// Split payment percentage shares do not sum to 10,000 bps (100%). Resolution: ensure split shares sum exactly to 10,000.
     InvalidSplitShares = 518,
+    /// Number of split recipients exceeds maximum supported recipient count. Resolution: reduce recipient list.
     TooManyRecipients = 519,
+    /// Counterparty address is invalid or identical to the sender. Resolution: provide valid distinct counterparty address.
     InvalidCounterparty = 540,
+    /// Split payout configuration for payment not found. Resolution: configure split rule before executing payment.
     SplitConfigNotFound = 520,
+    /// Split payout has already been executed for this payment. Resolution: no-op; split payout already executed.
     SplitAlreadyExecuted = 521,
+    /// Customer loyalty program is not configured. Resolution: configure loyalty parameters via set_loyalty_config().
     LoyaltyNotConfigured = 522,
+    /// Customer has insufficient loyalty points for requested redemption. Resolution: earn additional loyalty points.
     InsufficientPoints = 523,
+    /// Loyalty points have expired past their validity duration. Resolution: redeem points before validity period ends.
     PointsExpired = 524,
+    /// No accumulated platform fees are available to sweep. Resolution: wait until fees accumulate from transactions.
     NothingToSweep = 525,
+    /// Sweep recipient address has not been configured by admin. Resolution: configure recipient via set_sweep_recipient().
     SweepRecipientNotSet = 526,
+    /// Customer transaction exceeds rolling spend limit. Resolution: wait for spend limit rolling window to reset.
     SpendLimitExceeded = 527,
+    /// Spend limit has not been configured for this customer. Resolution: configure limit via set_customer_spend_limit().
     SpendLimitNotConfigured = 528,
+    /// Settlement finality period has not elapsed. Resolution: wait until required ledger finality blocks have passed.
     SettlementNotReady = 529,
+    /// Finality configuration not set. Resolution: initialize finality settings via set_finality_config().
     FinalityConfigNotFound = 530,
+    /// Settlement for this payment has already reached finality. Resolution: no-op; payment is finalized.
     SettlementAlreadyFinalized = 531,
+    /// Customer volume is below the volume threshold for a fee rebate. Resolution: achieve qualifying volume before claiming.
     RebateThresholdNotMet = 532,
+    /// Fee rebate for this period has already been claimed. Resolution: wait until next rebate qualification cycle.
     RebateAlreadyClaimed = 533,
+    /// Fee rebate program configuration not found. Resolution: initialize rebate config via set_rebate_config().
     RebateConfigNotFound = 534,
+    /// Payment forwarding route not found for recipient. Resolution: set up forwarding route via set_forward_config().
     ForwardConfigNotFound = 535,
+    /// Forwarding configuration creates a circular loop. Resolution: remove cyclic forwarding address references.
     ForwardLoop = 536,
+    /// Forwarding fee basis points exceed 10,000. Resolution: supply valid forward bps between 0 and 10,000.
     InvalidForwardBps = 537,
+    /// Payment sender and recipient addresses are identical. Resolution: specify distinct recipient address.
     SenderIsRecipient = 538,
+    /// Split payment total is below minimum split amount threshold. Resolution: submit payment at or above minimum split amount.
     BelowMinSplitAmount = 539,
-    // Issue #385: claimed settlement amounts must sum exactly to the channel deposit.
+    /// Claimed settlement amounts do not sum to the original channel deposit. Resolution: ensure merchant + customer refund = deposit.
     BalanceSumMismatch = 541,
 }
 
