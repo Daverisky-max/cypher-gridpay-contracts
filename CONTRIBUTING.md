@@ -38,6 +38,43 @@ Before you begin, ensure you have:
    ```bash
    cargo test --workspace
    ```
+
+### 🐳 Local Stellar Quickstart Environment (Docker)
+
+For local development and end-to-end integration testing against a standalone Stellar Soroban network, use the bundled `docker-compose.yml`:
+
+1. **Start the local standalone container**:
+   ```bash
+   docker compose up -d
+   ```
+   This spins up `stellar/quickstart:testing` with local Horizon and Soroban RPC listening at `http://localhost:8000/soroban/rpc`.
+
+2. **Configure the local network in Stellar CLI**:
+   ```bash
+   stellar network add --global local \
+     --rpc-url "http://localhost:8000/soroban/rpc" \
+     --network-passphrase "Standalone Network ; February 2017"
+   ```
+
+3. **Generate and fund a local development identity**:
+   ```bash
+   # Generate keypair
+   stellar keys generate --network local alice
+
+   # Fund identity via local Friendbot
+   curl -s "http://localhost:8000/friendbot?addr=$(stellar keys address alice)"
+   ```
+
+4. **Verify local connection**:
+   ```bash
+   stellar keys balance alice --network local
+   ```
+
+5. **Stop the local environment when done**:
+   ```bash
+   docker compose down
+   ```
+
 ### Makefile Targets
 
 The root `Makefile` provides several helpful targets to streamline development. Run these using `make <target>`.

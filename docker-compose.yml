@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  stellar-quickstart:
+    image: stellar/quickstart:testing
+    container_name: stellar-quickstart
+    ports:
+      - "8000:8000"
+    command: ["--standalone", "--enable-soroban-rpc"]
+    environment:
+      - NETWORK=standalone
+    restart: unless-stopped
