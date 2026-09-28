@@ -62,9 +62,13 @@ pub enum DataKey {
     PoolToken(u64),
     DefaultRefundPolicy,
     RefundPolicy(Address),
-    // Policy versioning (#134)
-    RefundPolicyVersion(Address, u32),
-    RefundPolicyVersionCount(Address),
+    // Policy versioning (#134) lives in `PolicyKey::RefundPolicyVersion{,Count}`.
+    // Issue #86: these variants used to be duplicated here as well. Because a
+    // `#[contracttype]` key serializes to `Vec[Symbol(variant_name), fields..]`
+    // — the *name*, not the enum's position — the duplicate spelling produced
+    // byte-identical storage keys, silently aliasing the two namespaces. The
+    // duplicates were removed; `PolicyKey` is now the single owner and the
+    // on-chain encoding is unchanged, so no migration is required.
     RefundPolicyTemplate(u64),
     RefundPolicyTemplateCount,
     // Payment contract address (#143)
@@ -118,6 +122,8 @@ pub enum ArbitrationKey {
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub enum PolicyKey {
+    // Sole owner of the versioned-policy namespace (issue #86). `DataKey` must
+    // never spell these variant names again — see the note on `DataKey`.
     RefundPolicyVersion(Address, u32),
     RefundPolicyVersionCount(Address),
     AutoRefundTrigger(u64),
@@ -3373,7 +3379,7 @@ impl RefundContract {
         let version_count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::RefundPolicyVersionCount(merchant.clone()))
+            .get(&PolicyKey::RefundPolicyVersionCount(merchant.clone()))
             .unwrap_or(0);
         let new_version = version_count + 1;
         let versioned = RefundPolicyVersion {
@@ -3383,11 +3389,11 @@ impl RefundContract {
             created_by,
         };
         env.storage().instance().set(
-            &DataKey::RefundPolicyVersion(merchant.clone(), new_version),
+            &PolicyKey::RefundPolicyVersion(merchant.clone(), new_version),
             &versioned,
         );
         env.storage().instance().set(
-            &DataKey::RefundPolicyVersionCount(merchant.clone()),
+            &PolicyKey::RefundPolicyVersionCount(merchant.clone()),
             &new_version,
         );
 
@@ -9011,6 +9017,9 @@ mod test_batch;
 
 #[cfg(test)]
 mod test_cross_contract;
+
+#[cfg(test)]
+mod test_storage_keys;
 
 #[cfg(test)]
 mod test_arbitration_fees;

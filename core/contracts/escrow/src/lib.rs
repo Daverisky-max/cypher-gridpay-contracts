@@ -1,6 +1,9 @@
 // This contract uses a multi-level enum structure for DataKey and Error to stay within
 // Soroban's 50-variant XDR limit. Each sub-enum must have <= 50 variants.
 #![no_std]
+
+#[cfg(test)]
+extern crate std;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     xdr::ToXdr, Address, Bytes, BytesN, Env, FromVal, IntoVal, String, Symbol, TryFromVal, Val,
@@ -11680,3 +11683,6 @@ mod escalation_timeout_test;
 //
 // #[cfg(test)]
 // mod test_sub_account;
+
+#[cfg(test)]
+mod test_storage_keys;

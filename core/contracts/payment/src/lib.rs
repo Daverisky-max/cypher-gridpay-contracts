@@ -1,6 +1,9 @@
 // This contract uses a multi-level enum structure for DataKey and Error to stay within
 // Soroban's 50-variant XDR limit. Each sub-enum must have <= 50 variants.
 #![no_std]
+
+#[cfg(test)]
+extern crate std;
 use escrow::EscrowContractClient;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, token, xdr::ToXdr, Address,
@@ -11361,7 +11364,7 @@ impl PaymentContract {
         signature: BytesN<64>,
     ) -> Result<(), Error> {
         Self::require_not_paused(&env, "settle_channel")?;
-        
+
         let mut channel: PaymentChannel = env
             .storage()
             .instance()
@@ -11684,7 +11687,10 @@ impl PaymentContract {
                 .unwrap_or_else(|| Vec::new(&env));
             page.push_back(payment_id);
             env.storage().instance().set(
-                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(merchant.clone(), page_num)),
+                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
+                    merchant.clone(),
+                    page_num,
+                )),
                 &page,
             );
         }
@@ -11901,10 +11907,9 @@ impl PaymentContract {
 
         // Mark payment as Completed to prevent subsequent complete_payment calls
         payment.status = PaymentStatus::Completed;
-        env.storage().instance().set(
-            &DataKey::Payment(PaymentKey::Data(payment_id)),
-            &payment,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
 
         Ok(())
     }
@@ -13034,3 +13039,6 @@ mod test_scheduled_payment;
 
 #[cfg(test)]
 mod schema_version_test;
+
+#[cfg(test)]
+mod test_storage_keys;
