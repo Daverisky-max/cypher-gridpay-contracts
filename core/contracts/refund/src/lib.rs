@@ -308,6 +308,8 @@ pub enum ExtError {
     // Issue #389: two-step admin rotation errors
     NoPendingAdmin = 59,
     NotPendingAdmin = 60,
+    // Merchant standing: suspended/sanctioned merchants cannot issue refunds
+    MerchantNotEligible = 61,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -692,6 +694,27 @@ pub enum EligibilityKey {
     MerchantCustomerIndex(Address, u64),
     /// Total number of eligibility entries for a merchant.
     MerchantCustomerCount(Address),
+    /// Admin-assigned standing of a merchant. Absent means `Active`.
+    MerchantStatus(Address),
+}
+
+/// Standing of a merchant with the platform. Only `Active` merchants may
+/// request or process refunds; suspended or sanctioned merchants are blocked
+/// so they cannot issue refunds that are not backed by good standing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum MerchantStatus {
+    Active,
+    Suspended,
+    Sanctioned,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantStatusUpdated {
+    pub merchant: Address,
+    pub status: MerchantStatus,
+    pub updated_by: Address,
 }
 
 #[contractevent]
@@ -5540,6 +5563,9 @@ impl RefundContract {
             return Err(Error::Core(CoreError::RefundExceedsPayment));
         }
 
+        // Suspended or sanctioned merchants may not issue refunds.
+        Self::require_merchant_active(&env, &merchant)?;
+
         Self::check_customer_refund_cooldown(&env, &customer)?;
 
         if payment_id == 0 {
@@ -5785,6 +5811,10 @@ impl RefundContract {
         if refund.status != RefundStatus::Approved {
             return Err(Error::Core(CoreError::InvalidStatus));
         }
+
+        // Re-check standing at payout time: a merchant suspended after the
+        // refund was requested/approved must not have it paid out.
+        Self::require_merchant_active(env, &refund.merchant)?;
 
         Self::can_refund_payment(
             env,
@@ -7380,6 +7410,58 @@ impl RefundContract {
                 }
             }
         }
+    }
+
+    // ── Merchant standing ─────────────────────────────────────────────────
+
+    /// Set a merchant's standing. Admin only.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the contract admin.
+    pub fn set_merchant_status(
+        env: Env,
+        admin: Address,
+        merchant: Address,
+        status: MerchantStatus,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+
+        env.storage()
+            .instance()
+            .set(&EligibilityKey::MerchantStatus(merchant.clone()), &status);
+
+        MerchantStatusUpdated {
+            merchant,
+            status,
+            updated_by: admin,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns a merchant's standing, defaulting to `Active` when unset.
+    pub fn get_merchant_status(env: Env, merchant: Address) -> MerchantStatus {
+        env.storage()
+            .instance()
+            .get(&EligibilityKey::MerchantStatus(merchant))
+            .unwrap_or(MerchantStatus::Active)
+    }
+
+    fn require_merchant_active(env: &Env, merchant: &Address) -> Result<(), Error> {
+        if Self::get_merchant_status(env.clone(), merchant.clone()) != MerchantStatus::Active {
+            return Err(Error::Ext(ExtError::MerchantNotEligible));
+        }
+        Ok(())
     }
 
     // ── Issue #148: Customer eligibility registry ─────────────────────────
