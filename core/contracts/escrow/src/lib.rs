@@ -200,6 +200,7 @@ pub enum ActionError {
     EvidenceDeadlinePassed = 313,
     ApprovalsThresholdNotMet = 314,
     InsufficientCollateral = 315,
+    StaleOraclePrice = 316,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -11230,10 +11231,27 @@ impl EscrowContract {
             Vec::new(&env),
         );
 
+        // Staleness check: oracle must expose `get_updated_at` returning the
+        // ledger timestamp (u64) of its last price update. Reject rates
+        // older than MAX_ORACLE_AGE_SECS to guard against front-running /
+        // sandwich attacks on stale prices.
+        const MAX_ORACLE_AGE_SECS: u64 = 300;
+        let updated_at: u64 = env.invoke_contract(
+            &swap_config.oracle,
+            &Symbol::new(&env, "get_updated_at"),
+            Vec::new(&env),
+        );
+        let now = env.ledger().timestamp();
+        if now.saturating_sub(updated_at) > MAX_ORACLE_AGE_SECS {
+            return Err(Error::Action(ActionError::StaleOraclePrice));
+        }
+
         // Output amount scaled by Stellar/Soroban standard 1e7 fixed-point rate representation.
         // The mock oracle and implementation use a 1e7 rate because the issue does not specify oracle decimals.
         let output_amount = (escrow.amount * rate) / 10_000_000;
 
+        // Slippage protection: caller-configured min_output_amount acts as
+        // the min_amount_out guard against excessive slippage.
         if output_amount < swap_config.min_output_amount {
             return Err(Error::Action(ActionError::SwapOutputBelowMinimum));
         }
