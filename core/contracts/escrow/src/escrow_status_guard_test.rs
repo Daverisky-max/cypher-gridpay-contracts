@@ -17,7 +17,9 @@ fn setup(env: &Env) -> (EscrowContractClient<'_>, Address, Address, Address, Add
     let admin = Address::generate(env);
     client.initialize(&admin);
 
-    let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let token_admin = token::StellarAssetClient::new(env, &token_addr);
     let customer = Address::generate(env);
     token_admin.mint(&customer, &10_000);
@@ -110,7 +112,10 @@ fn test_double_release_rejected() {
     let contract_balance = token_client.balance(&client.address);
 
     let result = client.try_release_escrow(&admin, &escrow_id, &false);
-    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::AlreadyProcessed))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(EscrowError::AlreadyProcessed)))
+    );
 
     // No additional funds moved on the rejected second release.
     assert_eq!(token_client.balance(&merchant), merchant_balance);
