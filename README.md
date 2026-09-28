@@ -122,3 +122,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-22 -->
 - #22: payment: Validate token contract address against whitelist in create_payment
+
+<!-- handsoff-issue-25 -->
+- #25: payment: Standardize and emit Soroban contract events for all payment lifecycle events
