@@ -88,6 +88,8 @@ pub enum DataKey {
     AppealWindowSeconds,
     // Issue #389: two-step admin rotation
     PendingAdmin,
+    // Issue #61: VIP tier policy verification for instant refund approval
+    VipTierPolicy(Address, u32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -5597,7 +5599,13 @@ impl RefundContract {
             .unwrap_or(0);
         let refund_id = counter + 1;
 
-        let initial_status = if force_approved {
+        // Issue #61: VIP tier customers with a verified, admin-assigned tier that the
+        // merchant has flagged as VIP are routed straight to `Approved` for instant
+        // refunds, since `validate_against_policy` above already enforced their
+        // tier-specific refund cap.
+        let is_vip_tier_customer = Self::is_vip_tier_customer(&env, &merchant, &customer);
+
+        let initial_status = if force_approved || is_vip_tier_customer {
             RefundStatus::Approved
         } else {
             let effective_merchant = if let Some(policy) =
@@ -8902,6 +8910,43 @@ impl RefundContract {
             .instance()
             .set(&DataKey::CustomerTier(customer), &tier_id);
         Ok(())
+    }
+
+    /// Mark whether a given customer tier qualifies for VIP instant refund approval
+    /// under a merchant's refund policy.
+    ///
+    /// # Arguments
+    /// * `merchant` - The merchant configuring the VIP tier (must authenticate).
+    /// * `tier_id` - The customer tier level being flagged.
+    /// * `is_vip` - Whether the tier qualifies for automatic instant approval.
+    pub fn set_vip_tier_policy(
+        env: Env,
+        merchant: Address,
+        tier_id: u32,
+        is_vip: bool,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::VipTierPolicy(merchant, tier_id), &is_vip);
+        Ok(())
+    }
+
+    /// Check whether the given customer's verified tier assignment is flagged as a
+    /// VIP tier by the merchant, qualifying the refund for automatic instant approval.
+    fn is_vip_tier_customer(env: &Env, merchant: &Address, customer: &Address) -> bool {
+        let tier_id_opt: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CustomerTier(customer.clone()));
+        match tier_id_opt {
+            Some(tier_id) => env
+                .storage()
+                .instance()
+                .get(&DataKey::VipTierPolicy(merchant.clone(), tier_id))
+                .unwrap_or(false),
+            None => false,
+        }
     }
 
     /// Get the tier level assigned to a customer.
