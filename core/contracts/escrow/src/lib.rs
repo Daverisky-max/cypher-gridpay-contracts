@@ -11676,7 +11676,8 @@ mod appeal_expiry_test;
 #[cfg(test)]
 mod escalation_timeout_test;
 //
-// mod health_check_test;
+#[cfg(test)]
+mod health_check_test;
 //
 // #[cfg(test)]
 // mod test_sub_account;
