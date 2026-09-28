@@ -562,6 +562,18 @@ pub struct EscrowReleased {
     pub token: Address,
 }
 
+// Issue #50: escrows transitioning into a dispute previously updated
+// storage/analytics but never emitted a dedicated event, leaving audit
+// systems and dashboards with no real-time signal that a dispute opened.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeOpened {
+    pub escrow_id: u64,
+    pub initiator: Address,
+    pub amount: i128,
+    pub opened_at: u64,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParticipantApproved {
@@ -4058,6 +4070,16 @@ impl EscrowContract {
                     escrow_id,
                     deadline: escrow.evidence_deadline.unwrap(),
                     set_at: escrow.dispute_started_at,
+                }
+                .publish(&env);
+
+                // Issue #50: emit a comprehensive lifecycle event when a
+                // dispute is opened.
+                DisputeOpened {
+                    escrow_id,
+                    initiator: caller.clone(),
+                    amount: escrow.amount,
+                    opened_at: escrow.dispute_started_at,
                 }
                 .publish(&env);
             }
@@ -11675,6 +11697,9 @@ mod appeal_expiry_test;
 
 #[cfg(test)]
 mod escalation_timeout_test;
+
+#[cfg(test)]
+mod dispute_opened_event_test;
 //
 // mod health_check_test;
 //
