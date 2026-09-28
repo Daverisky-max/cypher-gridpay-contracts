@@ -84,3 +84,36 @@ fn test_dispute_rejected_when_already_disputed() {
     let result = client.try_dispute_escrow(&merchant, &escrow_id);
     assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidStatus))));
 }
+
+#[test]
+fn test_release_marks_completed_before_payout() {
+    let env = Env::default();
+    let (client, admin, customer, merchant, token) = setup(&env);
+    let escrow_id = create_releasable_escrow(&env, &client, &customer, &merchant, &token);
+    let token_client = token::Client::new(&env, &token);
+
+    client.release_escrow(&admin, &escrow_id, &false);
+
+    assert_eq!(client.get_escrow(&escrow_id).status, EscrowStatus::Released);
+    assert_eq!(token_client.balance(&merchant), 1000);
+}
+
+#[test]
+fn test_double_release_rejected() {
+    let env = Env::default();
+    let (client, admin, customer, merchant, token) = setup(&env);
+    let escrow_id = create_releasable_escrow(&env, &client, &customer, &merchant, &token);
+    let token_client = token::Client::new(&env, &token);
+
+    client.release_escrow(&admin, &escrow_id, &false);
+    let merchant_balance = token_client.balance(&merchant);
+    let contract_balance = token_client.balance(&client.address);
+
+    let result = client.try_release_escrow(&admin, &escrow_id, &false);
+    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::AlreadyProcessed))));
+
+    // No additional funds moved on the rejected second release.
+    assert_eq!(token_client.balance(&merchant), merchant_balance);
+    assert_eq!(token_client.balance(&client.address), contract_balance);
+    assert_eq!(client.get_escrow(&escrow_id).status, EscrowStatus::Released);
+}

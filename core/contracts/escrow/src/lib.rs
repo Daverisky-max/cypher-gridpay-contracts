@@ -3795,10 +3795,13 @@ impl EscrowContract {
             }
         }
 
+        // Mark the escrow as completed (Released) and persist it BEFORE any
+        // token transfer below. can_release_escrow() has already verified the
+        // escrow is Locked, so a re-entrant or repeated release call observes
+        // the Released status and is rejected with AlreadyProcessed instead of
+        // paying the merchant twice.
         let mut escrow = EscrowContract::get_escrow(&env, escrow_id);
-        if escrow.status == EscrowStatus::Locked {
-            escrow.status = EscrowStatus::Released;
-        }
+        escrow.status = EscrowStatus::Released;
 
         env.storage()
             .instance()
