@@ -145,6 +145,8 @@ pub enum BasicError {
     InvalidInterval = 124,
     InvalidBps = 125,
     SchemaAlreadyAtTarget = 126,
+    // Issue #23: merchant's 24-hour aggregate volume exceeds their verification tier's cap
+    DailyTierLimitExceeded = 127,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -388,6 +390,8 @@ pub enum MerchantDataKey {
     MerchantActiveSubscriptions(Address, u64),
     MerchantActiveSubscriptionCount(Address),
     ActiveSubscriptionIndex(u64),
+    // Issue #23: 24-hour aggregate transaction volume per merchant, bucketed by day
+    DailyVolume(Address, u64),
 }
 
 // State and proposal data keys
@@ -2769,6 +2773,9 @@ impl PaymentContract {
 
         // Check merchant rate limits
         PaymentContract::check_merchant_rate_limit(env, &merchant, amount)?;
+
+        // Issue #23: Enforce verification tier limits on 24-hour aggregate volume
+        PaymentContract::check_and_update_daily_tier_volume(env, &merchant, amount)?;
 
         // Check customer spend limit (#217)
         PaymentContract::check_and_update_spend_limit(env, &customer, amount)?;
@@ -7549,6 +7556,36 @@ impl PaymentContract {
             &limit,
         );
 
+        Ok(())
+    }
+
+    /// Issue #23: Tracks a merchant's 24-hour aggregate transaction volume, bucketed
+    /// by calendar day, and rejects the payment if it would push that aggregate past
+    /// the merchant's verification tier's `volume_limit`. Merchants with no configured
+    /// tier limits are unaffected.
+    fn check_and_update_daily_tier_volume(
+        env: &Env,
+        merchant: &Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        let level = Self::get_merchant_verification_level(env.clone(), merchant.clone());
+        let tier_limits = match Self::get_tier_limits(env.clone(), level) {
+            Some(l) if l.volume_limit > 0 => l,
+            _ => return Ok(()),
+        };
+
+        let now = env.ledger().timestamp();
+        let day_bucket = now / SECONDS_PER_DAY;
+        let key = DataKey::Merchant(MerchantDataKey::DailyVolume(merchant.clone(), day_bucket));
+
+        let current_volume: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        let new_volume = current_volume.saturating_add(amount);
+
+        if new_volume > tier_limits.volume_limit {
+            return Err(Error::Basic(BasicError::DailyTierLimitExceeded));
+        }
+
+        env.storage().instance().set(&key, &new_volume);
         Ok(())
     }
 
@@ -12990,6 +13027,8 @@ mod test;
 
 #[cfg(test)]
 mod test_analytics;
+#[cfg(test)]
+mod test_daily_tier_volume;
 
 #[cfg(test)]
 mod test_trial;
