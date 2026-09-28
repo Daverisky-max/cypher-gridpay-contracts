@@ -125,3 +125,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-25 -->
 - #25: payment: Standardize and emit Soroban contract events for all payment lifecycle events
+
+<!-- handsoff-issue-26 -->
+- #26: escrow: Modularize monolithic 11,600-line lib.rs into domain submodules
