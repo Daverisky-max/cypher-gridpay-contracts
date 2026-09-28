@@ -125,3 +125,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-11 -->
 - #11: payment: Add nonce and replay protection to multisig action proposal execution
+
+<!-- handsoff-issue-13 -->
+- #13: payment: Add expiration and overflow checks to customer loyalty points system
