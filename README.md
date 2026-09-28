@@ -117,3 +117,8 @@ Recommended migration path:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-18 -->
+- #18: payment: Implement payment channel closing settlement with mutual signatures
