@@ -38,6 +38,8 @@ pub enum ConfigKey {
     SchemaVersion,
     TrustedBridge(Address),
     EvidenceDeadlineConfig,
+    ThresholdVersion,
+    ProposalApprovalVersion(String),
 }
 
 #[derive(Clone)]
@@ -1853,6 +1855,7 @@ impl EscrowContract {
             &DataKey::Config(ConfigKey::AdminProposal(proposal_id.clone())),
             &proposal,
         );
+        Self::set_proposal_approval_version(&env, &proposal_id);
 
         ActionProposed {
             proposal_id: proposal_id.clone(),
@@ -1906,12 +1909,20 @@ impl EscrowContract {
             return Err(Error::Escrow(EscrowError::InvalidStatus));
         }
 
+        // Approvals collected under a superseded threshold are void: the
+        // proposal has to gather a fresh quorum under the new threshold.
+        if !Self::proposal_approvals_current(&env, &proposal_id) {
+            proposal.approvals = Vec::new(&env);
+            proposal.approval_count = 0;
+        }
+
         if proposal.approvals.contains(&approver) {
             return Err(Error::Basic(BasicError::AlreadyApproved));
         }
 
         proposal.approvals.push_back(approver.clone());
         proposal.approval_count += 1;
+        Self::set_proposal_approval_version(&env, &proposal_id);
 
         env.storage().instance().set(
             &DataKey::Config(ConfigKey::AdminProposal(proposal_id.clone())),
@@ -1960,6 +1971,12 @@ impl EscrowContract {
         }
 
         if env.ledger().timestamp() > proposal.expires_at {
+            return Err(Error::Escrow(EscrowError::InvalidStatus));
+        }
+
+        // Approvals gathered under a superseded threshold must not execute
+        // under the rules that are in force now.
+        if !Self::proposal_approvals_current(&env, &proposal_id) {
             return Err(Error::Escrow(EscrowError::InvalidStatus));
         }
 
@@ -7078,6 +7095,46 @@ impl EscrowContract {
         result
     }
 
+    /// Signature-threshold generation currently in force.
+    ///
+    /// Bumped whenever `required_signatures` changes, so approvals collected
+    /// under a superseded threshold can be told apart from current ones.
+    fn threshold_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::ThresholdVersion))
+            .unwrap_or(0)
+    }
+
+    /// Records the threshold generation a proposal's approvals belong to.
+    fn set_proposal_approval_version(env: &Env, proposal_id: &String) {
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::ProposalApprovalVersion(proposal_id.clone())),
+            &Self::threshold_version(env),
+        );
+    }
+
+    /// True when a proposal's approvals were collected under the threshold that
+    /// is in force right now.
+    fn proposal_approvals_current(env: &Env, proposal_id: &String) -> bool {
+        let recorded: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::ProposalApprovalVersion(
+                proposal_id.clone(),
+            )))
+            .unwrap_or(0);
+        recorded == Self::threshold_version(env)
+    }
+
+    /// Invalidates approvals collected under the previous threshold.
+    fn bump_threshold_version(env: &Env) {
+        let next = Self::threshold_version(env).saturating_add(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::ThresholdVersion), &next);
+    }
+
     fn dispatch_action(env: &Env, proposal: &AdminProposal) -> Result<(), Error> {
         match proposal.action_type {
             ActionType::ReleaseEscrow => {
@@ -7349,6 +7406,7 @@ impl EscrowContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::Config(ConfigKey::AdminMultiSig), &config);
+                Self::bump_threshold_version(env);
             }
             ActionType::UpdateThreshold(new_threshold) => {
                 let mut config: MultiSigConfig = env
@@ -7366,6 +7424,7 @@ impl EscrowContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::Config(ConfigKey::AdminMultiSig), &config);
+                Self::bump_threshold_version(env);
             }
             _ => {}
         }
@@ -11646,8 +11705,8 @@ mod verification_test;
 #[cfg(test)]
 mod expiry_test;
 //
-// #[cfg(test)]
-// mod multisig_threshold_test;
+#[cfg(test)]
+mod multisig_threshold_test;
 //
 // #[cfg(test)]
 // #[cfg(test)]
