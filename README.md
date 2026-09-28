@@ -122,3 +122,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-18 -->
 - #18: payment: Implement payment channel closing settlement with mutual signatures
+
+<!-- handsoff-issue-21 -->
+- #21: payment: Prevent double-completion vulnerability on already completed payments
