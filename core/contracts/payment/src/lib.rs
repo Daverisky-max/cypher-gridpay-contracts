@@ -7,6 +7,8 @@ use soroban_sdk::{
     Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
 };
 
+pub mod storage;
+
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub enum Currency {
@@ -3079,6 +3081,7 @@ impl PaymentContract {
     /// # Panics
     /// Panics if the payment is not found.
     pub fn get_payment(env: &Env, payment_id: u64) -> Payment {
+        storage::extend_instance(env);
         env.storage()
             .instance()
             .get(&DataKey::Payment(PaymentKey::Data(payment_id)))
@@ -12742,17 +12745,11 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::InvalidAmount));
         }
 
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::Payment(PaymentKey::Tag(payment_id)))
-        {
+        if storage::has_persistent(&env, &DataKey::Payment(PaymentKey::Tag(payment_id))) {
             return Err(Error::Payment(PaymentError::AlreadyProcessed));
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::Tag(payment_id)), &tags);
+        storage::set_persistent(&env, &DataKey::Payment(PaymentKey::Tag(payment_id)), &tags);
 
         Ok(())
     }
@@ -12765,11 +12762,10 @@ impl PaymentContract {
     /// # Returns
     /// A vector of `BytesN<32>` tag hashes. Returns an empty vector if no tags exist.
     pub fn get_payment_tags(env: Env, payment_id: u64) -> Vec<BytesN<32>> {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, Vec<BytesN<32>>>(&DataKey::Payment(PaymentKey::Tag(payment_id)))
-        {
+        match storage::get_persistent::<_, Vec<BytesN<32>>>(
+            &env,
+            &DataKey::Payment(PaymentKey::Tag(payment_id)),
+        ) {
             Some(tags) => tags,
             None => Vec::new(&env),
         }
@@ -12802,11 +12798,9 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
 
-        let mut tags: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::Tag(payment_id)))
-            .ok_or(Error::Payment(PaymentError::NotFound))?;
+        let mut tags: Vec<BytesN<32>> =
+            storage::get_persistent(&env, &DataKey::Payment(PaymentKey::Tag(payment_id)))
+                .ok_or(Error::Payment(PaymentError::NotFound))?;
 
         // Find and remove the tag
         let mut found = false;
@@ -12823,9 +12817,11 @@ impl PaymentContract {
             return Err(Error::Payment(PaymentError::NotFound));
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::Tag(payment_id)), &new_tags);
+        storage::set_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::Tag(payment_id)),
+            &new_tags,
+        );
 
         Ok(())
     }
@@ -12863,11 +12859,7 @@ impl PaymentContract {
         }
 
         // Check if invoice already attached
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::Payment(PaymentKey::Invoice(payment_id)))
-        {
+        if storage::has_persistent(&env, &DataKey::Payment(PaymentKey::Invoice(payment_id))) {
             return Err(Error::Payment(PaymentError::AlreadyProcessed));
         }
 
@@ -12891,13 +12883,11 @@ impl PaymentContract {
         }
 
         // Get next invoice ID
-        let invoice_id: u64 = env
-            .storage()
-            .persistent()
-            .get::<_, u64>(&DataKey::Payment(PaymentKey::InvoiceCounter))
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or(Error::Basic(BasicError::InvalidAmount))?;
+        let invoice_id: u64 =
+            storage::get_persistent::<_, u64>(&env, &DataKey::Payment(PaymentKey::InvoiceCounter))
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(Error::Basic(BasicError::InvalidAmount))?;
 
         // Create and store invoice
         let invoice = PaymentInvoice {
@@ -12910,13 +12900,18 @@ impl PaymentContract {
             issued_at: env.ledger().timestamp(),
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::Invoice(payment_id)), &invoice);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::InvoiceCounter), &invoice_id);
-        env.storage().persistent().set(
+        storage::set_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::Invoice(payment_id)),
+            &invoice,
+        );
+        storage::set_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::InvoiceCounter),
+            &invoice_id,
+        );
+        storage::set_persistent(
+            &env,
             &DataKey::Payment(PaymentKey::InvoicePaymentId(invoice_id)),
             &payment_id,
         );
@@ -12932,13 +12927,11 @@ impl PaymentContract {
     /// # Returns
     /// `Some(PaymentInvoice)` if the invoice exists, `None` otherwise.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Option<PaymentInvoice> {
-        let payment_id: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::InvoicePaymentId(invoice_id)))?;
-        env.storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::Invoice(payment_id)))
+        let payment_id: u64 = storage::get_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::InvoicePaymentId(invoice_id)),
+        )?;
+        storage::get_persistent(&env, &DataKey::Payment(PaymentKey::Invoice(payment_id)))
     }
 
     /// Returns the invoice attached to a specific payment.
@@ -12949,9 +12942,7 @@ impl PaymentContract {
     /// # Returns
     /// `Some(PaymentInvoice)` if an invoice is attached, `None` otherwise.
     pub fn get_payment_invoice(env: Env, payment_id: u64) -> Option<PaymentInvoice> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::Invoice(payment_id)))
+        storage::get_persistent(&env, &DataKey::Payment(PaymentKey::Invoice(payment_id)))
     }
 
     /// Verifies that an invoice's stored total matches a recalculation of its line items.
@@ -13034,3 +13025,6 @@ mod test_scheduled_payment;
 
 #[cfg(test)]
 mod schema_version_test;
+
+#[cfg(test)]
+mod test_storage_ttl;

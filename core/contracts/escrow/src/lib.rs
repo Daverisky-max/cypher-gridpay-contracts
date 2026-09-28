@@ -7,6 +7,8 @@ use soroban_sdk::{
     Vec,
 };
 
+pub mod storage;
+
 #[derive(Clone)]
 #[contracttype]
 pub enum ConfigKey {
@@ -3603,6 +3605,7 @@ impl EscrowContract {
     /// # Panics
     /// Panics if required state is missing.
     pub fn get_escrow(env: &Env, escrow_id: u64) -> Escrow {
+        storage::extend_instance(env);
         env.storage()
             .instance()
             .get(&DataKey::Escrow(EscrowKey::Data(escrow_id)))
@@ -11680,3 +11683,6 @@ mod escalation_timeout_test;
 //
 // #[cfg(test)]
 // mod test_sub_account;
+
+#[cfg(test)]
+mod storage_ttl_test;
