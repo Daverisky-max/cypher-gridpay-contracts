@@ -9474,6 +9474,14 @@ impl EscrowContract {
             _ => {}
         }
 
+        // Defense in depth: a beneficiary transfer must not bypass a dispute
+        // that was ever opened on this escrow without the buyer's explicit
+        // co-signature, even if the escrow status has since moved away from
+        // Disputed/Resolved via some other code path.
+        if escrow.dispute_started_at != 0 && caller != escrow.customer {
+            escrow.customer.require_auth();
+        }
+
         if new_merchant == escrow.merchant {
             return Err(Error::Action(ActionError::SameBeneficiary));
         }
@@ -9582,6 +9590,15 @@ impl EscrowContract {
                 return Err(Error::Action(ActionError::TransferNotAllowed));
             }
             _ => {}
+        }
+
+        // Defense in depth: even if the escrow status is no longer Disputed,
+        // a beneficiary transfer must not bypass a dispute that was ever
+        // opened on this escrow without the buyer's explicit co-signature.
+        // This guards against future status-transition changes that might
+        // otherwise allow a merchant to quietly slip out of a filed dispute.
+        if escrow.dispute_started_at != 0 {
+            escrow.customer.require_auth();
         }
 
         if new_beneficiary == escrow.merchant {
