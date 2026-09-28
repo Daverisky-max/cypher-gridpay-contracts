@@ -4005,6 +4005,14 @@ impl EscrowContract {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
 
+        // Only an active (Locked) escrow can be disputed. Completed (Released)
+        // and refunded (Resolved/Cancelled) escrows are terminal, and an
+        // already-Disputed escrow cannot be re-opened. This check runs before
+        // any collateral is pulled from the caller.
+        if escrow.status != EscrowStatus::Locked {
+            return Err(Error::Escrow(EscrowError::InvalidStatus));
+        }
+
         // Handle collateral
         let config = Self::get_dispute_config(env.clone());
         if config.collateral_enabled && config.collateral_amount > 0 {
@@ -4061,10 +4069,8 @@ impl EscrowContract {
                 }
                 .publish(&env);
             }
-            EscrowStatus::Released => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
-            EscrowStatus::Disputed => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
-            EscrowStatus::Resolved => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
-            EscrowStatus::Cancelled => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
+            // Unreachable: non-Locked statuses are rejected above.
+            _ => return Err(Error::Escrow(EscrowError::InvalidStatus)),
         }
 
         env.storage()
@@ -11675,6 +11681,9 @@ mod appeal_expiry_test;
 
 #[cfg(test)]
 mod escalation_timeout_test;
+
+#[cfg(test)]
+mod escrow_status_guard_test;
 //
 // mod health_check_test;
 //
