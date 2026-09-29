@@ -117,3 +117,8 @@ Recommended migration path:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-103 -->
+- #103: testing: Add fuzz testing for malformed and zero address inputs across all contract entry points
