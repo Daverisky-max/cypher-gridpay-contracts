@@ -128,3 +128,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-100 -->
 - #100: testing: Audit and expand test coverage for unexercised branches in refund/src/lib.rs
+
+<!-- handsoff-issue-101 -->
+- #101: testing: Add simulated multi-threaded concurrent transaction test suite
