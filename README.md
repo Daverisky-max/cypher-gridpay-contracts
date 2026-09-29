@@ -122,3 +122,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-92 -->
 - #92: storage: Audit contract instance storage footprint to stay within 64KB Soroban limit
+
+<!-- handsoff-issue-93 -->
+- #93: storage: Use temporary storage for ephemeral request tokens and rate-limit windows
