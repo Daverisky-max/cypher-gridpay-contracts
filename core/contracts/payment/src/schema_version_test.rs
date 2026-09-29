@@ -33,3 +33,23 @@ fn test_migrate_schema_rejects_already_at_target() {
         Err(Ok(Error::Basic(BasicError::SchemaAlreadyAtTarget)))
     );
 }
+
+#[test]
+fn test_migrate_schema_rejects_version_downgrade() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PaymentContract, ());
+    let client = PaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.migrate_schema(&admin, &3);
+    assert_eq!(client.get_schema_version(), 3);
+
+    let result = client.try_migrate_schema(&admin, &2);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Basic(BasicError::SchemaAlreadyAtTarget)))
+    );
+    assert_eq!(client.get_schema_version(), 3);
+}
