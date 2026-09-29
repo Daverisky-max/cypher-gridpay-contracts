@@ -109,6 +109,7 @@ Recommended migration path:
 ## 🔗 Links
 
 - [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
+- [Storage Restoration Guide](docs/STORAGE_RESTORATION.md)
 - Telegram: https://t.me/+afM9uh7GGtVkYmZk
 - [API Repository](https://github.com/cypher-gridpay/cypher-gridpay-api)
 - [SDK Repository](https://github.com/cypher-gridpay/cypher-gridpay-sdk)
