@@ -125,3 +125,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-104 -->
 - #104: testing: Implement time-travel simulation test suite for timelocks and expirations
+
+<!-- handsoff-issue-105 -->
+- #105: testing: Benchmark gas and CPU budget consumption for high-frequency operations
