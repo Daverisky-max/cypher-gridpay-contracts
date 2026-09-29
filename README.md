@@ -117,3 +117,8 @@ Recommended migration path:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-98 -->
+- #98: testing: Audit and expand test coverage for unexercised branches in payment/src/lib.rs
