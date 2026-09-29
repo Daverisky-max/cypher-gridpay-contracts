@@ -117,3 +117,8 @@ Recommended migration path:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-92 -->
+- #92: storage: Audit contract instance storage footprint to stay within 64KB Soroban limit
