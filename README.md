@@ -122,3 +122,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-103 -->
 - #103: testing: Add fuzz testing for malformed and zero address inputs across all contract entry points
+
+<!-- handsoff-issue-104 -->
+- #104: testing: Implement time-travel simulation test suite for timelocks and expirations
