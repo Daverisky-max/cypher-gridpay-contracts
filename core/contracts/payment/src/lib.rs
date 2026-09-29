@@ -66,6 +66,7 @@ pub enum PaymentKey {
     AccumulatedFees,
     LargePaymentCounter,
     Discount(u64),
+    TotalPendingSettlement(Address), // Track total pending settlement amount per token
 }
 
 pub const MAX_MEMO_VERSIONS: u32 = 10;
@@ -263,6 +264,7 @@ pub enum FeatureError {
     BelowMinSplitAmount = 539,
     // Issue #385: claimed settlement amounts must sum exactly to the channel deposit.
     BalanceSumMismatch = 541,
+    InsufficientBalanceForSweep = 542,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -308,7 +310,7 @@ impl TryFrom<soroban_sdk::Error> for Error {
     fn try_from(error: soroban_sdk::Error) -> Result<Self, Self::Error> {
         if error.is_type(soroban_sdk::xdr::ScErrorType::Contract) {
             let code = error.get_code();
-            if code >= 500 && code <= 540 {
+            if code >= 500 && code <= 542 {
                 return Ok(Error::Feature(unsafe { core::mem::transmute(code) }));
             }
             if code >= 400 && code <= 406 {
@@ -3884,6 +3886,20 @@ impl PaymentContract {
                     &DataKey::Payment(PaymentKey::PendingSettlement(payment_id)),
                     &settlement,
                 );
+                
+                // Track total pending settlement amount per token for sweep validation
+                let total_pending: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Payment(PaymentKey::TotalPendingSettlement(
+                        payment.token.clone(),
+                    )))
+                    .unwrap_or(0);
+                env.storage().instance().set(
+                    &DataKey::Payment(PaymentKey::TotalPendingSettlement(payment.token.clone())),
+                    &(total_pending + net_amount),
+                );
+                
                 let idx: u64 = env
                     .storage()
                     .instance()
@@ -12030,7 +12046,23 @@ impl PaymentContract {
             .instance()
             .get(&DataKey::Config(ConfigKey::FeeConfig))
             .ok_or(Error::Feature(FeatureError::FeeConfigNotFound))?;
+        
+        // Security check: Ensure sweep won't encroach on merchant pending settlements
         let token_client = token::Client::new(&env, &fee_config.fee_token);
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        let total_pending: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::TotalPendingSettlement(
+                fee_config.fee_token.clone(),
+            )))
+            .unwrap_or(0);
+        
+        // Verify: contract_balance >= total_pending + accumulated_fees
+        if contract_balance < total_pending + accumulated {
+            return Err(Error::Feature(FeatureError::InsufficientBalanceForSweep));
+        }
+        
         token_client.transfer(&env.current_contract_address(), &recipient, &accumulated);
         env.storage()
             .instance()
@@ -12525,6 +12557,20 @@ impl PaymentContract {
             &settlement.merchant,
             &settlement.amount,
         );
+        
+        // Decrement total pending settlement amount for this token
+        let total_pending: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::TotalPendingSettlement(
+                settlement.token.clone(),
+            )))
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::Payment(PaymentKey::TotalPendingSettlement(settlement.token.clone())),
+            &(total_pending.saturating_sub(settlement.amount)),
+        );
+        
         env.storage().instance().set(
             &DataKey::State(StateDataKey::SettlementFinalized(payment_id)),
             &true,
