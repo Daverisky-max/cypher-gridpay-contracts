@@ -125,3 +125,6 @@ This project is licensed under the [MIT License](LICENSE).
 
 <!-- handsoff-issue-99 -->
 - #99: testing: Audit and expand test coverage for unexercised branches in escrow/src/lib.rs
+
+<!-- handsoff-issue-100 -->
+- #100: testing: Audit and expand test coverage for unexercised branches in refund/src/lib.rs
