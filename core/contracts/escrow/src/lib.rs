@@ -11983,7 +11983,8 @@ mod escalation_timeout_test;
 #[cfg(test)]
 mod escrow_status_guard_test;
 //
-// mod health_check_test;
+#[cfg(test)]
+mod health_check_test;
 //
 // #[cfg(test)]
 // mod test_sub_account;
