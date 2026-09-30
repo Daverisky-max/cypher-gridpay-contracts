@@ -5486,3 +5486,49 @@ fn test_vesting_acceleration_cap_not_exceeded_on_second_complete() {
     let vested = client.get_vested_amount(&escrow_id);
     assert!(vested <= 10000);
 }
+
+#[test]
+fn test_evidence_deadline_extended_on_late_submission() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1000);
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    let escrow_id =
+        client.create_escrow(&customer, &merchant, &1000_i128, &token, &5000_u64, &0_u64);
+
+    // Open dispute
+    client.dispute_escrow(&customer, &escrow_id);
+    let escrow_before = client.get_escrow(&escrow_id);
+    let initial_deadline = escrow_before
+        .evidence_deadline
+        .expect("evidence deadline set");
+
+    // Advance timestamp to within 1 hour of deadline (trigger window is <= 2 hours)
+    let late_submission_time = initial_deadline - 3600;
+    env.ledger().set_timestamp(late_submission_time);
+
+    let ipfs_hash = String::from_str(&env, "QmProofOfDeliveryHash123");
+    client.submit_evidence(&customer, &escrow_id, &ipfs_hash);
+
+    let escrow_after = client.get_escrow(&escrow_id);
+    let extended_deadline = escrow_after.evidence_deadline.expect("deadline exists");
+
+    // Must be extended by exactly 86400 seconds (24 hours)
+    assert_eq!(extended_deadline, initial_deadline + 86400);
+
+    // Counterparty can now submit evidence after the original deadline but before the extended deadline
+    env.ledger().set_timestamp(initial_deadline + 1800); // 30 mins after old deadline
+    let merchant_proof = String::from_str(&env, "QmMerchantCounterProof456");
+    let res = client.try_submit_evidence(&merchant, &escrow_id, &merchant_proof);
+    assert!(res.is_ok());
+}
+
