@@ -768,6 +768,18 @@ pub struct AppealExpired {
     pub expired_at: u64,
 }
 
+/// Emitted when a party attempts to file an appeal at or after the close of the
+/// appeal window. Mirrors [`EvidenceDeadlineExceeded`] so late attempts are
+/// observable even though the call itself is rejected.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppealWindowClosed {
+    pub escrow_id: u64,
+    pub appellant: Address,
+    pub attempted_at: u64,
+    pub appeal_deadline: u64,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TemplateCreated {
@@ -1665,6 +1677,10 @@ fn sum_approved_weight(env: &Env, escrow_id: u64, participants: &Vec<Participant
 const INITIAL_SCHEMA_VERSION: u32 = 1;
 const MIGRATION_TARGET_SCHEMA_VERSION: u32 = 2;
 const MIN_CLAWBACK_DELAY: u64 = 86_400;
+/// Length of the dispute appeal window in seconds (72 hours). An appeal is
+/// accepted only while `now < dispute_started_at + APPEAL_WINDOW_SECONDS`, so
+/// the boundary is deterministic rather than depending on `<` vs `≤` drift.
+const APPEAL_WINDOW_SECONDS: u64 = 259_200;
 
 #[contract]
 pub struct EscrowContract;
@@ -5253,12 +5269,23 @@ impl EscrowContract {
             return Err(Error::Escrow(EscrowError::InvalidStatus));
         }
 
-        // Check if appeal window is open (72 hours = 259200 seconds)
+        // The appeal window is open strictly before its deadline: an appeal is
+        // accepted only while `now < dispute_started_at + APPEAL_WINDOW_SECONDS`.
+        // Filing exactly at the deadline belongs to the closed window, which keeps
+        // the boundary deterministic (no `<` vs `<=` ambiguity) and mirrors the
+        // `expire_appeal` check that requires `now > appeal_deadline`.
         let now = env.ledger().timestamp();
         let dispute_time = escrow.dispute_started_at;
-        let appeal_window: u64 = 259200; // 72 hours
+        let appeal_deadline = dispute_time.saturating_add(APPEAL_WINDOW_SECONDS);
 
-        if now.saturating_sub(dispute_time) > appeal_window {
+        if now >= appeal_deadline {
+            AppealWindowClosed {
+                escrow_id,
+                appellant: appellant.clone(),
+                attempted_at: now,
+                appeal_deadline,
+            }
+            .publish(&env);
             return Err(Error::Escrow(EscrowError::InvalidStatus));
         }
 
@@ -5283,7 +5310,7 @@ impl EscrowContract {
 
         // Create new appeal
         let appeal_id = appeals_count;
-        let appeal_deadline = now.saturating_add(appeal_window);
+        let appeal_deadline = now.saturating_add(APPEAL_WINDOW_SECONDS);
 
         let appeal = DisputeAppeal {
             appeal_id,
