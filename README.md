@@ -144,6 +144,7 @@ error in your app. See [sdk/typescript/README.md](sdk/typescript/README.md).
 - [TypeScript SDK](sdk/typescript/README.md)
 - [Python SDK](docs/PYTHON_SDK.md)
 - [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
+- [Storage Restoration Guide](docs/STORAGE_RESTORATION.md)
 - Telegram: https://t.me/+afM9uh7GGtVkYmZk
 - [API Repository](https://github.com/cypher-gridpay/cypher-gridpay-api)
 - [SDK Repository](https://github.com/cypher-gridpay/cypher-gridpay-sdk)
