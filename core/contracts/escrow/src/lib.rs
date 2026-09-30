@@ -1611,6 +1611,7 @@ impl EscrowContract {
     /// # Returns
     /// Nothing.
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env
             .storage()
             .instance()
@@ -7778,8 +7779,11 @@ impl EscrowContract {
     /// # Returns
     /// Results in `Ok(())` on success or `Err(Error)` on failure.
     ///
-    /// # Errors
-    /// Returns `Err(Error)` when the operation cannot be completed.
+    /// Alias for pause_contract.
+    pub fn pause(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        Self::pause_contract(env, admin, reason)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env

@@ -1960,6 +1960,7 @@ impl PaymentContract {
     /// # Panics
     /// Panics if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env
             .storage()
             .instance()
@@ -9995,8 +9996,11 @@ impl PaymentContract {
     /// # Returns
     /// `Ok(())` on success.
     ///
-    /// # Errors
-    /// Returns an error if the caller is not an authorized admin.
+    /// Alias for pause_contract to pause all operations.
+    pub fn pause(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        Self::pause_contract(env, admin, reason)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
@@ -12249,7 +12253,20 @@ impl PaymentContract {
     /// # Errors
     /// Returns an error if the caller is not an admin, the sweep recipient
     /// is not set, the fee config is missing, or there are no fees to sweep.
-    pub fn sweep_platform_fees(env: Env, admin: Address) -> Result<i128, Error> {
+    /// Sweeps up to `sweep_amount` of accumulated platform fees to the configured recipient.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must be a multi-sig admin).
+    /// * `sweep_amount` - The amount of accumulated fees to sweep.
+    ///
+    /// # Returns
+    /// The amount swept as `i128`.
+    ///
+    /// # Errors
+    /// Returns an error if the caller is not an admin, the sweep recipient
+    /// is not set, accumulated fees are empty, `sweep_amount` exceeds accumulated fees,
+    /// or multisig approval is required for amounts above threshold.
+    pub fn sweep_fees(env: Env, admin: Address, sweep_amount: i128) -> Result<i128, Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
             .storage()
@@ -12303,7 +12320,7 @@ impl PaymentContract {
         token_client.transfer(&env.current_contract_address(), &recipient, &sweep_amount);
         env.storage()
             .instance()
-            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &0i128);
+            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &remaining);
         let sweep_id: u64 = env
             .storage()
             .instance()
