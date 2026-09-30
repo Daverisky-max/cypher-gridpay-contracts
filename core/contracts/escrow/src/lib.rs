@@ -1,11 +1,16 @@
 // This contract uses a multi-level enum structure for DataKey and Error to stay within
 // Soroban's 50-variant XDR limit. Each sub-enum must have <= 50 variants.
 #![no_std]
+
+#[cfg(test)]
+extern crate std;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     xdr::ToXdr, Address, Bytes, BytesN, Env, FromVal, IntoVal, String, Symbol, TryFromVal, Val,
     Vec,
 };
+
+pub mod storage;
 
 #[derive(Clone)]
 #[contracttype]
@@ -122,82 +127,146 @@ pub enum DataKey {
     ReleaseThresholdBps(u64),
 }
 
+/// Administrative, multi-sig, and protocol configuration errors for EscrowContract.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum BasicError {
+    /// Caller is not authorized for this escrow operation. Resolution: sign with the participant, arbiter, or admin key.
     Unauthorized = 100,
+    /// Caller is not a designated administrator. Resolution: invoke using an active admin account.
     NotAnAdmin = 101,
+    /// Admin has already submitted an approval for this proposal. Resolution: wait for remaining required approvals.
     AlreadyApproved = 102,
+    /// Contract is globally paused or functionality is suspended. Resolution: wait for admin to resume contract.
     ContractPaused = 103,
+    /// Approver has already voted or signed on this action. Resolution: cannot register duplicate approval.
     DuplicateApproval = 104,
+    /// Multi-signature configuration has not been set up. Resolution: initialize contract multi-sig config.
     MultiSigNotInitialized = 105,
+    /// Storage migration has not been initiated. Resolution: start migration before executing step migrations.
     MigrationNotStarted = 106,
+    /// Storage migration has already been completed to target schema. Resolution: no further migration needed.
     AlreadyMigrated = 107,
+    /// Escrow participant or beneficiary address was not found. Resolution: verify participant address.
     ParticipantNotFound = 108,
+    /// Merkle inclusion proof verification failed. Resolution: provide valid proof path and committed root.
     InvalidMerkleProof = 109,
+    /// Merkle tree root has already been committed and cannot be overwritten. Resolution: root is immutable once set.
     RootAlreadyCommitted = 110,
+    /// Fee or split basis points exceed 10,000 (100%). Resolution: provide basis points between 0 and 10,000.
     InvalidBps = 111,
+    /// Total admin count is below required signature threshold. Resolution: add additional admins before updating threshold.
     InsufficientAdmins = 112,
+    /// Supplied address is malformed or invalid. Resolution: provide valid 32-byte Stellar account or contract address.
     InvalidAddress = 113,
+    /// Storage schema is already at or above the requested version. Resolution: specify newer version for migration.
     SchemaAlreadyAtTarget = 114,
 }
 
+/// Errors relating to escrow creation, status transitions, vesting, and expiration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum EscrowError {
+    /// Escrow record ID not found in storage. Resolution: verify escrow ID before calling functions.
     NotFound = 200,
+    /// Escrow is in an invalid status for the requested transition. Resolution: ensure escrow is in required status.
     InvalidStatus = 201,
+    /// Escrow funds have already been released or refunded. Resolution: no-op; escrow is already completed.
     AlreadyProcessed = 202,
+    /// Release conditions or milestone requirements have not been satisfied yet. Resolution: complete pending milestones.
     ReleaseNotYetAvailable = 203,
+    /// Inactivity or dispute resolution timeout has not been reached. Resolution: wait until timeout deadline passes.
     TimeoutNotReached = 204,
+    /// Escrow release is in a mandatory cooling/hold period. Resolution: wait until hold period expires.
     ReleaseOnHoldPeriod = 205,
+    /// Vesting schedule parameters (cliff, duration, intervals) are invalid. Resolution: provide non-zero duration and valid cliff.
     InvalidVestingSchedule = 206,
+    /// Vesting cliff timestamp has not arrived yet. Resolution: wait until vesting cliff period has elapsed.
     CliffPeriodNotPassed = 207,
+    /// Milestone has already been claimed and released. Resolution: release remaining unreleased milestones.
     MilestoneAlreadyReleased = 208,
+    /// Escrow cannot be claimed as expired before expiry timestamp. Resolution: wait until expiration timestamp has passed.
     EscrowNotExpired = 209,
+    /// Action cannot be performed because escrow has already expired. Resolution: claim refund or create new escrow.
     EscrowAlreadyExpired = 210,
+    /// Expiration timestamp is earlier than the earliest release timestamp. Resolution: set expiry after release schedule.
     ExpiryBeforeRelease = 211,
+    /// Escrow template ID not found. Resolution: register template via create_template() first.
     TemplateNotFound = 212,
+    /// Escrow template is currently deactivated. Resolution: activate template or use active template.
     TemplateInactive = 213,
+    /// Sub-account identifier not found within escrow record. Resolution: verify sub-account ID.
     SubAccountNotFound = 214,
+    /// Funds for this sub-account have already been released. Resolution: cannot release sub-account funds twice.
     SubAccountAlreadyReleased = 215,
+    /// Sum of sub-account allocations exceeds total escrow funding. Resolution: ensure sub-account allocations <= total.
     SubAccountFundingExceedsEscrow = 216,
+    /// Conditional escrow dependency rule not found. Resolution: register conditional escrow mapping before execution.
     ConditionalEscrowNotFound = 217,
+    /// Parent escrow in hierarchical dependency tree was not found. Resolution: create parent escrow first.
     ParentEscrowNotFound = 218,
+    /// Child escrows in hierarchy have not all been resolved. Resolution: resolve child escrows before parent release.
     ChildrenNotResolved = 219,
+    /// Escrow nesting depth exceeds maximum allowed tree depth. Resolution: flatten escrow hierarchy structure.
     MaxHierarchyDepth = 220,
+    /// Number of items in batch operation exceeds batch ceiling. Resolution: reduce batch size under limit.
     BatchTooLarge = 221,
+    /// Contract renewal feature is disabled for this escrow. Resolution: enable renewal at creation time.
     RenewalDisabled = 222,
+    /// Maximum number of extension renewals has been reached. Resolution: finalize escrow; cannot extend further.
     MaxRenewalsReached = 223,
+    /// New expiration timestamp must be strictly later than current expiry. Resolution: specify later timestamp.
     NewExpiryNotAfterCurrent = 224,
+    /// Requested renewal duration is below minimum allowed renewal period. Resolution: extend by at least min_period.
     RenewalPeriodTooShort = 225,
+    /// Requested renewal duration exceeds maximum allowed renewal ceiling. Resolution: extend by less than max_period.
     RenewalPeriodTooLong = 226,
+    /// Approval threshold configuration value is invalid. Resolution: provide threshold between 1 and total signers.
     InvalidThreshold = 227,
+    /// A succession plan is already registered for this admin/party. Resolution: cancel existing plan before registering new.
     SuccessionPlanExists = 228,
+    /// Clawback delay parameter is below protocol minimum safety delay. Resolution: increase clawback delay.
     ClawbackDelayTooShort = 229,
 }
 
+/// Errors relating to disputes, arbitration, evidence, observers, and token swaps.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum ActionError {
+    /// Escrow is not ready for the requested action. Resolution: verify state prerequisites before invoking.
     NotReady = 300,
+    /// Escrow must be in disputed state to perform this dispute resolution action. Resolution: raise dispute first.
     NotDisputed = 301,
+    /// Address is already registered as an observer on this escrow. Resolution: observer is already active.
     ObserverAlreadyAdded = 302,
+    /// Observer address not found on this escrow. Resolution: register observer before performing observer actions.
     ObserverNotFound = 303,
+    /// Milestone vesting acceleration would breach the maximum acceleration cap. Resolution: lower acceleration amount.
     AccelerationLimitExceeded = 304,
+    /// Escrow beneficiary transfer is disabled or disallowed for this role. Resolution: ensure transfer rights are enabled.
     TransferNotAllowed = 305,
+    /// New beneficiary address cannot be identical to current beneficiary. Resolution: specify different new address.
     SameBeneficiary = 306,
+    /// Conditional escrow trigger has already been evaluated. Resolution: cannot re-evaluate finalized condition.
     ConditionAlreadyEvaluated = 307,
+    /// Staleness threshold parameter is not configured. Resolution: configure stale threshold before checking staleness.
     StaleThresholdNotConfigured = 308,
+    /// Token swap configuration for automatic conversion not found. Resolution: configure swap route parameters.
     SwapConfigNotFound = 309,
+    /// Slippage exceeded: swap output amount is below minimum acceptable output. Resolution: increase slippage tolerance.
     SwapOutputBelowMinimum = 310,
+    /// Token swap has already been executed for this escrow. Resolution: cannot execute duplicate swap.
     SwapAlreadyExecuted = 311,
+    /// Number of escrows in batch release exceeds maximum batch release limit. Resolution: chunk batch into smaller sizes.
     BatchReleaseSizeLimitExceeded = 312,
+    /// Evidence submission window has expired. Resolution: submit dispute evidence before deadline passes.
     EvidenceDeadlinePassed = 313,
+    /// Multi-party approval threshold has not been reached. Resolution: collect required signatures before executing release.
     ApprovalsThresholdNotMet = 314,
+    /// Deposited collateral balance is insufficient for this operation. Resolution: fund additional collateral to escrow.
     InsufficientCollateral = 315,
 }
 
@@ -645,6 +714,15 @@ pub struct EvidenceDeadlineExceeded {
     pub escrow_id: u64,
     pub deadline: u64,
     pub submitted_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceDeadlineExtended {
+    pub escrow_id: u64,
+    pub previous_deadline: u64,
+    pub new_deadline: u64,
+    pub extended_at: u64,
 }
 
 #[contractevent]
@@ -1602,6 +1680,7 @@ impl EscrowContract {
     /// # Returns
     /// Nothing.
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env
             .storage()
             .instance()
@@ -1753,11 +1832,12 @@ impl EscrowContract {
             return Ok(0);
         }
 
-        Self::transfer_if_token_contract(&env, &token, &to, amount)?;
+        // CEI: zero the accumulated balance before transferring it out.
         env.storage().instance().set(
             &DataKey::Participant(ParticipantKey::AccumulatedFees(token.clone())),
             &0i128,
         );
+        Self::transfer_if_token_contract(&env, &token, &to, amount)?;
 
         EscrowFeesWithdrawn {
             amount,
@@ -2499,18 +2579,14 @@ impl EscrowContract {
             return Err(Error::Action(ActionError::NotReady));
         }
 
-        let escrow = EscrowContract::get_escrow(&env, request.escrow_id);
-        let token_client = token::Client::new(&env, &escrow.token);
-        let contract_address = env.current_contract_address();
+        let mut escrow = EscrowContract::get_escrow(&env, request.escrow_id);
 
-        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
-        token_client.transfer(&contract_address, &admin, &distributable);
-
-        let mut updated_escrow = escrow;
-        updated_escrow.status = EscrowStatus::Resolved;
+        // CEI: mark the escrow Resolved and the request executed before the
+        // outbound transfer so a re-entrant call sees the clawback as done.
+        escrow.status = EscrowStatus::Resolved;
         env.storage().instance().set(
             &DataKey::Escrow(EscrowKey::Data(request.escrow_id)),
-            &updated_escrow,
+            &escrow,
         );
 
         request.executed = true;
@@ -2518,6 +2594,10 @@ impl EscrowContract {
             &DataKey::Config(ConfigKey::AdminClawbackRequest(request_id)),
             &request,
         );
+
+        let token_client = token::Client::new(&env, &escrow.token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer(&contract_address, &admin, &escrow.amount);
 
         Ok(())
     }
@@ -2718,10 +2798,6 @@ impl EscrowContract {
             }
         }
 
-        // Transfer funds from customer to contract
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&customer, &env.current_contract_address(), &amount);
-
         let counter: u64 = env
             .storage()
             .instance()
@@ -2840,6 +2916,12 @@ impl EscrowContract {
             a.total_value_locked += amount;
         });
 
+        // CEI: all escrow state, indexes and analytics are written above; the
+        // external token call (customer -> contract deposit) is the last
+        // interaction. A failed transfer reverts the whole invocation.
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&customer, &env.current_contract_address(), &amount);
+
         // Issue #398: emitting this event is what lets dashboards subscribe to
         // new-escrow notifications via Horizon instead of polling known escrow IDs.
         EscrowCreated {
@@ -2925,11 +3007,6 @@ impl EscrowContract {
             });
         }
 
-        // Transfer funds from customer to contract
-        let token_client = token::Client::new(&env, &token);
-        let contract_address = env.current_contract_address();
-        token_client.transfer(&customer, &contract_address, &total_amount);
-
         // Use a counter for ID
         let counter: u64 = env
             .storage()
@@ -2969,6 +3046,12 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::ReleaseThresholdBps(escrow_id), &10000u32);
+
+        // CEI: escrow state is fully persisted above; the customer -> contract
+        // deposit is the last interaction. A failed transfer reverts everything.
+        let token_client = token::Client::new(&env, &escrow.token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer(&customer, &contract_address, &total_amount);
 
         MultiPartyEscrowCreated {
             escrow_id,
@@ -3117,6 +3200,13 @@ impl EscrowContract {
             return Err(Error::Escrow(EscrowError::ReleaseNotYetAvailable));
         }
 
+        // CEI: persist the Released status before paying out participants so
+        // a re-entrant call fails the Locked check above.
+        escrow.status = EscrowStatus::Released;
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)), &escrow);
+
         // Perform transfers
         let token_client = token::Client::new(&env, &escrow.token);
         let contract_address = env.current_contract_address();
@@ -3129,11 +3219,6 @@ impl EscrowContract {
                 }
             }
         }
-
-        escrow.status = EscrowStatus::Released;
-        env.storage()
-            .instance()
-            .set(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)), &escrow);
 
         MultiPartyEscrowReleased { escrow_id }.publish(&env);
 
@@ -3352,13 +3437,6 @@ impl EscrowContract {
             }
         }
 
-        // Pull each token amount into the contract escrow.
-        let contract_address = env.current_contract_address();
-        for entry in tokens.iter() {
-            let token_client = token::Client::new(&env, &entry.token);
-            token_client.transfer(&customer, &contract_address, &entry.amount);
-        }
-
         let counter: u64 = env
             .storage()
             .instance()
@@ -3385,6 +3463,14 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::MultiTokenCounter), &escrow_id);
+
+        // CEI: escrow state is persisted above; pull each token amount into
+        // the contract last. Any failed transfer reverts the whole invocation.
+        let contract_address = env.current_contract_address();
+        for entry in escrow.tokens.iter() {
+            let token_client = token::Client::new(&env, &entry.token);
+            token_client.transfer(&customer, &contract_address, &entry.amount);
+        }
 
         MultiTokenEscrowCreated {
             escrow_id,
@@ -3439,6 +3525,14 @@ impl EscrowContract {
             }
         }
 
+        // CEI: persist the Released status before any outbound transfer. If a
+        // transfer fails, returning Err rolls back this write as well.
+        let token_count = escrow.tokens.len();
+        escrow.status = EscrowStatus::Released;
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(EscrowKey::MultiToken(escrow_id)), &escrow);
+
         for entry in escrow.tokens.iter() {
             let token_client = token::Client::new(&env, &entry.token);
             if token_client
@@ -3448,12 +3542,6 @@ impl EscrowContract {
                 return Err(Error::Escrow(EscrowError::InvalidStatus));
             }
         }
-
-        let token_count = escrow.tokens.len();
-        escrow.status = EscrowStatus::Released;
-        env.storage()
-            .instance()
-            .set(&DataKey::Escrow(EscrowKey::MultiToken(escrow_id)), &escrow);
 
         MultiTokenEscrowReleased {
             escrow_id,
@@ -3522,6 +3610,7 @@ impl EscrowContract {
             return Err(Error::Escrow(EscrowError::ReleaseNotYetAvailable));
         }
 
+        // CEI: Cancelled status is persisted before the refund transfer.
         escrow.status = EscrowStatus::Cancelled;
         env.storage()
             .instance()
@@ -3579,6 +3668,7 @@ impl EscrowContract {
             return Err(Error::Escrow(EscrowError::ReleaseNotYetAvailable));
         }
 
+        // CEI: Cancelled status is persisted before the refund transfers.
         escrow.status = EscrowStatus::Cancelled;
         env.storage()
             .instance()
@@ -3604,6 +3694,7 @@ impl EscrowContract {
     /// # Panics
     /// Panics if required state is missing.
     pub fn get_escrow(env: &Env, escrow_id: u64) -> Escrow {
+        storage::extend_instance(env);
         env.storage()
             .instance()
             .get(&DataKey::Escrow(EscrowKey::Data(escrow_id)))
@@ -3796,60 +3887,36 @@ impl EscrowContract {
             }
         }
 
+        // Mark the escrow as completed (Released) and persist it BEFORE any
+        // token transfer below. can_release_escrow() has already verified the
+        // escrow is Locked, so a re-entrant or repeated release call observes
+        // the Released status and is rejected with AlreadyProcessed instead of
+        // paying the merchant twice.
         let mut escrow = EscrowContract::get_escrow(&env, escrow_id);
-        if escrow.status == EscrowStatus::Locked {
-            escrow.status = EscrowStatus::Released;
-        }
+        escrow.status = EscrowStatus::Released;
 
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
 
-        // Sub-account milestone ledgers are isolated from the parent: a
-        // parent-level liquidation may only touch the parent's own remainder.
-        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
-        let fee_amount = (distributable * escrow.fee_bps) / 10000;
-        let merchant_amount = distributable - fee_amount;
+        let fee_amount = (escrow.amount * escrow.fee_bps) / 10000;
+        let merchant_amount = escrow.amount - fee_amount;
+        let fee_config = Self::get_escrow_fee_config(env.clone());
 
-        if fee_amount > 0 {
-            let fee_config = Self::get_escrow_fee_config(env.clone());
-            EscrowContract::transfer_if_token_contract(
-                &env,
-                &escrow.token,
-                &fee_config.fee_recipient,
-                fee_amount,
-            )?;
-
-            if fee_config.fee_recipient == env.current_contract_address() {
-                let mut acc: i128 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::Participant(ParticipantKey::AccumulatedFees(
-                        escrow.token.clone(),
-                    )))
-                    .unwrap_or(0);
-                acc += fee_amount;
-                env.storage().instance().set(
-                    &DataKey::Participant(ParticipantKey::AccumulatedFees(escrow.token.clone())),
-                    &acc,
-                );
-            }
-
-            EscrowFeeCollected {
-                escrow_id,
-                fee_amount,
-                recipient: fee_config.fee_recipient.clone(),
-            }
-            .publish(&env);
+        if fee_amount > 0 && fee_config.fee_recipient == env.current_contract_address() {
+            let mut acc: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Participant(ParticipantKey::AccumulatedFees(
+                    escrow.token.clone(),
+                )))
+                .unwrap_or(0);
+            acc += fee_amount;
+            env.storage().instance().set(
+                &DataKey::Participant(ParticipantKey::AccumulatedFees(escrow.token.clone())),
+                &acc,
+            );
         }
-
-        let recipient = recipient_override.unwrap_or(escrow.merchant.clone());
-        EscrowContract::transfer_if_token_contract(
-            &env,
-            &escrow.token,
-            &recipient,
-            merchant_amount,
-        )?;
 
         // Update reputation for both parties on successful completion.
         EscrowContract::update_reputation_on_completion(&env, &escrow.merchant);
@@ -3900,6 +3967,32 @@ impl EscrowContract {
             a.total_escrows_released += 1;
             a.total_value_released += rel_amount;
         });
+
+        // CEI: status, fee accumulator, reputation and analytics are all
+        // persisted above. External token transfers happen last.
+        if fee_amount > 0 {
+            EscrowContract::transfer_if_token_contract(
+                &env,
+                &escrow.token,
+                &fee_config.fee_recipient,
+                fee_amount,
+            )?;
+
+            EscrowFeeCollected {
+                escrow_id,
+                fee_amount,
+                recipient: fee_config.fee_recipient.clone(),
+            }
+            .publish(&env);
+        }
+
+        let recipient = recipient_override.unwrap_or(escrow.merchant.clone());
+        EscrowContract::transfer_if_token_contract(
+            &env,
+            &escrow.token,
+            &recipient,
+            merchant_amount,
+        )?;
 
         EscrowReleased {
             escrow_id,
@@ -3960,10 +4053,7 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
 
-        // Only the parent's unallocated remainder is refundable: child
-        // sub-account milestone ledgers stay reserved for their own release.
-        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
-
+        // CEI: Resolved status is persisted above before refunding the customer.
         EscrowContract::transfer_if_token_contract(
             &env,
             &escrow.token,
@@ -4013,6 +4103,14 @@ impl EscrowContract {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
 
+        // Only an active (Locked) escrow can be disputed. Completed (Released)
+        // and refunded (Resolved/Cancelled) escrows are terminal, and an
+        // already-Disputed escrow cannot be re-opened. This check runs before
+        // any collateral is pulled from the caller.
+        if escrow.status != EscrowStatus::Locked {
+            return Err(Error::Escrow(EscrowError::InvalidStatus));
+        }
+
         // Handle collateral
         let config = Self::get_dispute_config(env.clone());
         if config.collateral_enabled && config.collateral_amount > 0 {
@@ -4023,13 +4121,6 @@ impl EscrowContract {
             {
                 return Err(Error::Action(ActionError::InsufficientCollateral));
             }
-
-            let token_client = token::Client::new(&env, &config.collateral_token);
-            token_client.transfer(
-                &caller,
-                &env.current_contract_address(),
-                &config.collateral_amount,
-            );
 
             let collateral = DisputeCollateral {
                 escrow_id,
@@ -4069,10 +4160,8 @@ impl EscrowContract {
                 }
                 .publish(&env);
             }
-            EscrowStatus::Released => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
-            EscrowStatus::Disputed => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
-            EscrowStatus::Resolved => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
-            EscrowStatus::Cancelled => return Err(Error::Escrow(EscrowError::AlreadyProcessed)),
+            // Unreachable: non-Locked statuses are rejected above.
+            _ => return Err(Error::Escrow(EscrowError::InvalidStatus)),
         }
 
         env.storage()
@@ -4104,6 +4193,17 @@ impl EscrowContract {
         EscrowContract::update_merchant_analytics(&env, &merchant_addr, |a| {
             a.total_disputes += 1;
         });
+
+        // CEI: the Disputed status, collateral record and analytics are all
+        // persisted above; the collateral deposit is the last interaction.
+        if config.collateral_enabled && config.collateral_amount > 0 {
+            let token_client = token::Client::new(&env, &config.collateral_token);
+            token_client.transfer(
+                &caller,
+                &env.current_contract_address(),
+                &config.collateral_amount,
+            );
+        }
 
         EscrowDisputed {
             escrow_id,
@@ -4150,8 +4250,8 @@ impl EscrowContract {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
 
-        // Check evidence submission deadline
-        if let Some(deadline) = escrow.evidence_deadline {
+        // Check evidence submission deadline and apply grace period extension if submitted close to deadline
+        if let Some(mut deadline) = escrow.evidence_deadline {
             let current_time = env.ledger().timestamp();
             if current_time > deadline {
                 EvidenceDeadlineExceeded {
@@ -4161,6 +4261,28 @@ impl EscrowContract {
                 }
                 .publish(&env);
                 return Err(Error::Action(ActionError::EvidenceDeadlinePassed));
+            }
+
+            // Issue #108: Grace period front-running mitigation
+            // If evidence is submitted within 2 hours (7200s) of deadline, extend by 24 hours (86400s)
+            const GRACE_TRIGGER_WINDOW: u64 = 7200; // 2 hours
+            const GRACE_EXTENSION_DURATION: u64 = 86400; // 24 hours
+            if deadline.saturating_sub(current_time) <= GRACE_TRIGGER_WINDOW {
+                let previous_deadline = deadline;
+                deadline = deadline.saturating_add(GRACE_EXTENSION_DURATION);
+                let mut updated_escrow = escrow.clone();
+                updated_escrow.evidence_deadline = Some(deadline);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &updated_escrow);
+
+                EvidenceDeadlineExtended {
+                    escrow_id,
+                    previous_deadline,
+                    new_deadline: deadline,
+                    extended_at: current_time,
+                }
+                .publish(&env);
             }
         }
 
@@ -4477,8 +4599,8 @@ impl EscrowContract {
 
         let now = env.ledger().timestamp();
 
-        // Enforce the same evidence deadline as the single-item path.
-        if let Some(deadline) = escrow.evidence_deadline {
+        // Enforce evidence deadline and apply grace period extension if submitted close to deadline
+        if let Some(mut deadline) = escrow.evidence_deadline {
             if now > deadline {
                 EvidenceDeadlineExceeded {
                     escrow_id,
@@ -4487,6 +4609,27 @@ impl EscrowContract {
                 }
                 .publish(&env);
                 return Err(Error::Action(ActionError::EvidenceDeadlinePassed));
+            }
+
+            // Issue #108: Grace period front-running mitigation
+            const GRACE_TRIGGER_WINDOW: u64 = 7200; // 2 hours
+            const GRACE_EXTENSION_DURATION: u64 = 86400; // 24 hours
+            if deadline.saturating_sub(now) <= GRACE_TRIGGER_WINDOW {
+                let previous_deadline = deadline;
+                deadline = deadline.saturating_add(GRACE_EXTENSION_DURATION);
+                let mut updated_escrow = escrow.clone();
+                updated_escrow.evidence_deadline = Some(deadline);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &updated_escrow);
+
+                EvidenceDeadlineExtended {
+                    escrow_id,
+                    previous_deadline,
+                    new_deadline: deadline,
+                    extended_at: now,
+                }
+                .publish(&env);
             }
         }
         let page_num: u32 = env
@@ -4745,15 +4888,19 @@ impl EscrowContract {
 
         let favor = escrow.auto_resolve_in_favor_of.clone();
 
-        // Child sub-account milestone ledgers are isolated from the parent.
-        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
+        // CEI: persist the final status and remove the escrow from the
+        // escalation queue before any token transfer.
+        escrow.status = match &favor {
+            AutoResolveFavor::Merchant => EscrowStatus::Released,
+            AutoResolveFavor::Customer | AutoResolveFavor::SplitEqual => EscrowStatus::Resolved,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+        Self::dequeue_escalation(&env, escrow_id);
 
         match &favor {
             AutoResolveFavor::Customer => {
-                escrow.status = EscrowStatus::Resolved;
-                env.storage()
-                    .instance()
-                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
                 EscrowContract::transfer_if_token_contract(
                     &env,
                     &escrow.token,
@@ -4762,10 +4909,6 @@ impl EscrowContract {
                 )?;
             }
             AutoResolveFavor::Merchant => {
-                escrow.status = EscrowStatus::Released;
-                env.storage()
-                    .instance()
-                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
                 EscrowContract::transfer_if_token_contract(
                     &env,
                     &escrow.token,
@@ -4774,12 +4917,8 @@ impl EscrowContract {
                 )?;
             }
             AutoResolveFavor::SplitEqual => {
-                let half = distributable / 2;
-                let remainder = distributable - half;
-                escrow.status = EscrowStatus::Resolved;
-                env.storage()
-                    .instance()
-                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+                let half = escrow.amount / 2;
+                let remainder = escrow.amount - half;
                 EscrowContract::transfer_if_token_contract(
                     &env,
                     &escrow.token,
@@ -4801,8 +4940,6 @@ impl EscrowContract {
             resolved_at: now,
         })
         .publish(&env);
-
-        Self::dequeue_escalation(&env, escrow_id);
 
         Ok(())
     }
@@ -4946,56 +5083,24 @@ impl EscrowContract {
 
         Self::dequeue_escalation(&env, escrow_id);
 
-        // Transfer the parent's unallocated remainder; child sub-account
-        // milestone ledgers are isolated and never liquidated here.
-        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
-        let recipient = if release_to_merchant {
-            &escrow.merchant
-        } else {
-            &escrow.customer
-        };
-        Self::transfer_if_token_contract(&env, &escrow.token, recipient, distributable)?;
-
-        // Handle collateral distribution
-        if let Some(collateral) = env
-            .storage()
-            .instance()
-            .get::<DataKey, DisputeCollateral>(&DataKey::Dispute(DisputeKey::Collateral(escrow_id)))
-        {
-            let winner = if release_to_merchant {
-                escrow.merchant.clone()
-            } else {
-                escrow.customer.clone()
-            };
-
-            let token_client = token::Client::new(&env, &collateral.token);
-            token_client.transfer(&env.current_contract_address(), &winner, &collateral.amount);
-
-            if winner == collateral.disputing_party {
-                CollateralReturned {
-                    escrow_id,
-                    party: collateral.disputing_party,
-                    amount: collateral.amount,
-                }
-                .publish(&env);
-            } else {
-                CollateralForfeited {
-                    escrow_id,
-                    party: collateral.disputing_party,
-                    amount: collateral.amount,
-                }
-                .publish(&env);
-            }
-            env.storage()
-                .instance()
-                .remove(&DataKey::Dispute(DisputeKey::Collateral(escrow_id)));
-        }
-
         let (winner, loser) = if release_to_merchant {
             (escrow.merchant.clone(), escrow.customer.clone())
         } else {
             (escrow.customer.clone(), escrow.merchant.clone())
         };
+
+        // CEI: clear the collateral record before paying it out so it cannot
+        // be distributed twice.
+        let collateral: Option<DisputeCollateral> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(DisputeKey::Collateral(escrow_id)));
+        if collateral.is_some() {
+            env.storage()
+                .instance()
+                .remove(&DataKey::Dispute(DisputeKey::Collateral(escrow_id)));
+        }
+
         EscrowContract::update_reputation_on_dispute_outcome(&env, &winner, &loser);
 
         // Update global analytics
@@ -5021,6 +5126,34 @@ impl EscrowContract {
         EscrowContract::update_merchant_analytics(&env, &escrow.merchant, |a| {
             a.total_resolutions += 1;
         });
+
+        // CEI: all state (status, collateral record, reputation, analytics) is
+        // persisted above. External token transfers happen last.
+
+        // Transfer main escrow funds to the dispute winner
+        Self::transfer_if_token_contract(&env, &escrow.token, &winner, escrow.amount)?;
+
+        // Distribute collateral to the dispute winner
+        if let Some(collateral) = collateral {
+            let token_client = token::Client::new(&env, &collateral.token);
+            token_client.transfer(&env.current_contract_address(), &winner, &collateral.amount);
+
+            if winner == collateral.disputing_party {
+                CollateralReturned {
+                    escrow_id,
+                    party: collateral.disputing_party,
+                    amount: collateral.amount,
+                }
+                .publish(&env);
+            } else {
+                CollateralForfeited {
+                    escrow_id,
+                    party: collateral.disputing_party,
+                    amount: collateral.amount,
+                }
+                .publish(&env);
+            }
+        }
 
         EscrowResolved {
             escrow_id,
@@ -5315,42 +5448,13 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow_mut);
 
-        // Transfer funds to the party in favor
-        Self::transfer_if_token_contract(
-            &env,
-            &escrow_mut.token,
-            &in_favour_of,
-            escrow_mut.amount,
-        )?;
-
-        // Handle collateral distribution if any
-        if let Some(collateral) = env
+        // CEI: clear the collateral record before paying it out so it cannot
+        // be distributed twice.
+        let collateral: Option<DisputeCollateral> = env
             .storage()
             .instance()
-            .get::<DataKey, DisputeCollateral>(&DataKey::Dispute(DisputeKey::Collateral(escrow_id)))
-        {
-            let token_client = token::Client::new(&env, &collateral.token);
-            token_client.transfer(
-                &env.current_contract_address(),
-                &in_favour_of,
-                &collateral.amount,
-            );
-
-            if in_favour_of == collateral.disputing_party {
-                CollateralReturned {
-                    escrow_id,
-                    party: collateral.disputing_party,
-                    amount: collateral.amount,
-                }
-                .publish(&env);
-            } else {
-                CollateralForfeited {
-                    escrow_id,
-                    party: collateral.disputing_party,
-                    amount: collateral.amount,
-                }
-                .publish(&env);
-            }
+            .get(&DataKey::Dispute(DisputeKey::Collateral(escrow_id)));
+        if collateral.is_some() {
             env.storage()
                 .instance()
                 .remove(&DataKey::Dispute(DisputeKey::Collateral(escrow_id)));
@@ -5374,6 +5478,43 @@ impl EscrowContract {
         EscrowContract::update_merchant_analytics(&env, &escrow_mut.merchant, |a| {
             a.total_resolutions += 1;
         });
+
+        // CEI: appeal, round, status, collateral record and analytics are all
+        // persisted above. External token transfers happen last.
+
+        // Transfer funds to the party in favor
+        Self::transfer_if_token_contract(
+            &env,
+            &escrow_mut.token,
+            &in_favour_of,
+            escrow_mut.amount,
+        )?;
+
+        // Handle collateral distribution if any
+        if let Some(collateral) = collateral {
+            let token_client = token::Client::new(&env, &collateral.token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &in_favour_of,
+                &collateral.amount,
+            );
+
+            if in_favour_of == collateral.disputing_party {
+                CollateralReturned {
+                    escrow_id,
+                    party: collateral.disputing_party,
+                    amount: collateral.amount,
+                }
+                .publish(&env);
+            } else {
+                CollateralForfeited {
+                    escrow_id,
+                    party: collateral.disputing_party,
+                    amount: collateral.amount,
+                }
+                .publish(&env);
+            }
+        }
 
         AppealResolved {
             appeal_id,
@@ -6792,6 +6933,7 @@ impl EscrowContract {
             &vesting_schedule,
         );
 
+        // CEI: the updated vesting schedule is persisted above; transfer last.
         // Transfer the releasable tokens to the merchant
         EscrowContract::transfer_if_token_contract(
             &env,
@@ -6940,6 +7082,7 @@ impl EscrowContract {
             &vesting_schedule,
         );
 
+        // CEI: milestone marked released and schedule persisted above.
         // Transfer to merchant
         EscrowContract::transfer_if_token_contract(
             &env,
@@ -7044,6 +7187,10 @@ impl EscrowContract {
 
     // For existing tests that use synthetic token addresses, transfer calls are skipped when the
     // address is not a token contract. For real token contracts, transfer failures bubble up.
+    //
+    // CEI (checks-effects-interactions): this is an external call into the
+    // token contract. Every caller must persist all state changes (status,
+    // balances, accumulators, analytics) BEFORE invoking it.
     fn transfer_if_token_contract(
         env: &Env,
         token_address: &Address,
@@ -7140,51 +7287,26 @@ impl EscrowContract {
                     .instance()
                     .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
 
-                // Child sub-account milestone ledgers are isolated from the parent.
-                let distributable = Self::parent_liquidatable_amount(env, &escrow);
-                let fee_amount = (distributable * escrow.fee_bps) / 10000;
-                let merchant_amount = distributable - fee_amount;
+                let fee_amount = (escrow.amount * escrow.fee_bps) / 10000;
+                let merchant_amount = escrow.amount - fee_amount;
+                let fee_config = EscrowContract::get_escrow_fee_config(env.clone());
 
-                if fee_amount > 0 {
-                    let fee_config = EscrowContract::get_escrow_fee_config(env.clone());
-                    EscrowContract::transfer_if_token_contract(
-                        env,
-                        &escrow.token,
-                        &fee_config.fee_recipient,
-                        fee_amount,
-                    )?;
-
-                    if fee_config.fee_recipient == env.current_contract_address() {
-                        let mut acc: i128 = env
-                            .storage()
-                            .instance()
-                            .get(&DataKey::Participant(ParticipantKey::AccumulatedFees(
-                                escrow.token.clone(),
-                            )))
-                            .unwrap_or(0);
-                        acc += fee_amount;
-                        env.storage().instance().set(
-                            &DataKey::Participant(ParticipantKey::AccumulatedFees(
-                                escrow.token.clone(),
-                            )),
-                            &acc,
-                        );
-                    }
-
-                    EscrowFeeCollected {
-                        escrow_id,
-                        fee_amount,
-                        recipient: fee_config.fee_recipient.clone(),
-                    }
-                    .publish(env);
+                if fee_amount > 0 && fee_config.fee_recipient == env.current_contract_address() {
+                    let mut acc: i128 = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::Participant(ParticipantKey::AccumulatedFees(
+                            escrow.token.clone(),
+                        )))
+                        .unwrap_or(0);
+                    acc += fee_amount;
+                    env.storage().instance().set(
+                        &DataKey::Participant(ParticipantKey::AccumulatedFees(
+                            escrow.token.clone(),
+                        )),
+                        &acc,
+                    );
                 }
-
-                EscrowContract::transfer_if_token_contract(
-                    env,
-                    &escrow.token,
-                    &escrow.merchant,
-                    merchant_amount,
-                )?;
 
                 EscrowContract::update_reputation_on_completion(env, &escrow.merchant);
                 EscrowContract::update_reputation_on_completion(env, &escrow.customer);
@@ -7219,6 +7341,31 @@ impl EscrowContract {
                     a.total_escrows_released += 1;
                     a.total_value_released += distributable;
                 });
+
+                // CEI: status, fee accumulator, reputation and analytics are
+                // persisted above. External token transfers happen last.
+                if fee_amount > 0 {
+                    EscrowContract::transfer_if_token_contract(
+                        env,
+                        &escrow.token,
+                        &fee_config.fee_recipient,
+                        fee_amount,
+                    )?;
+
+                    EscrowFeeCollected {
+                        escrow_id,
+                        fee_amount,
+                        recipient: fee_config.fee_recipient.clone(),
+                    }
+                    .publish(env);
+                }
+
+                EscrowContract::transfer_if_token_contract(
+                    env,
+                    &escrow.token,
+                    &escrow.merchant,
+                    merchant_amount,
+                )?;
 
                 EscrowReleased {
                     escrow_id,
@@ -7264,23 +7411,6 @@ impl EscrowContract {
                 };
                 EscrowContract::update_reputation_on_dispute_outcome(env, &winner, &loser);
 
-                let distributable = Self::parent_liquidatable_amount(env, &escrow);
-                if release_to_merchant {
-                    EscrowContract::transfer_if_token_contract(
-                        env,
-                        &escrow.token,
-                        &escrow.merchant,
-                        distributable,
-                    )?;
-                } else {
-                    EscrowContract::transfer_if_token_contract(
-                        env,
-                        &escrow.token,
-                        &escrow.customer,
-                        distributable,
-                    )?;
-                }
-
                 // Update analytics
                 let mut analytics: EscrowAnalytics = env
                     .storage()
@@ -7303,6 +7433,14 @@ impl EscrowContract {
                 EscrowContract::update_customer_analytics(env, &escrow.customer, |a| {
                     a.total_resolutions += 1;
                 });
+
+                // CEI: status, reputation and analytics are persisted above.
+                EscrowContract::transfer_if_token_contract(
+                    env,
+                    &escrow.token,
+                    &winner,
+                    escrow.amount,
+                )?;
 
                 EscrowResolved {
                     escrow_id,
@@ -7744,8 +7882,11 @@ impl EscrowContract {
     /// # Returns
     /// Results in `Ok(())` on success or `Err(Error)` on failure.
     ///
-    /// # Errors
-    /// Returns `Err(Error)` when the operation cannot be completed.
+    /// Alias for pause_contract.
+    pub fn pause(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        Self::pause_contract(env, admin, reason)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
@@ -8721,8 +8862,7 @@ impl EscrowContract {
             return Err(Error::Escrow(EscrowError::InvalidStatus));
         }
 
-        Self::transfer_if_token_contract(&env, &pool.token, &claim.claimant, claim.amount)?;
-
+        // CEI: debit the pool and mark the claim paid before transferring.
         pool.balance -= claim.amount;
         pool.total_claims_paid += claim.amount;
         env.storage().instance().set(
@@ -8736,6 +8876,8 @@ impl EscrowContract {
             &DataKey::Dispute(DisputeKey::InsuranceClaim(claim_id)),
             &claim,
         );
+
+        Self::transfer_if_token_contract(&env, &pool.token, &claim.claimant, claim.amount)?;
 
         Ok(())
     }
@@ -8835,9 +8977,8 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
 
-        // Child sub-account milestone ledgers are isolated from the parent.
-        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
-        Self::transfer_if_token_contract(&env, &escrow.token, &released_to, distributable)?;
+        // CEI: final status is persisted above before the transfer.
+        Self::transfer_if_token_contract(&env, &escrow.token, &released_to, escrow.amount)?;
 
         WatchdogReleaseTriggered {
             escrow_id,
@@ -9369,36 +9510,34 @@ impl EscrowContract {
                 .instance()
                 .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
 
-            // Child sub-account milestone ledgers are isolated from the parent.
-            let distributable = Self::parent_liquidatable_amount(&env, &escrow);
-            let fee_amount = (distributable * escrow.fee_bps) / 10000;
-            let merchant_amount = distributable - fee_amount;
+            let fee_amount = (escrow.amount * escrow.fee_bps) / 10000;
+            let merchant_amount = escrow.amount - fee_amount;
+            let fee_config = Self::get_escrow_fee_config(env.clone());
 
+            if fee_amount > 0 && fee_config.fee_recipient == env.current_contract_address() {
+                let mut acc: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Participant(ParticipantKey::AccumulatedFees(
+                        escrow.token.clone(),
+                    )))
+                    .unwrap_or(0);
+                acc += fee_amount;
+                env.storage().instance().set(
+                    &DataKey::Participant(ParticipantKey::AccumulatedFees(escrow.token.clone())),
+                    &acc,
+                );
+            }
+
+            // CEI: Released status and fee accumulator are persisted above.
+            // External token transfers happen last.
             if fee_amount > 0 {
-                let fee_config = Self::get_escrow_fee_config(env.clone());
                 EscrowContract::transfer_if_token_contract(
                     &env,
                     &escrow.token,
                     &fee_config.fee_recipient,
                     fee_amount,
                 )?;
-
-                if fee_config.fee_recipient == env.current_contract_address() {
-                    let mut acc: i128 = env
-                        .storage()
-                        .instance()
-                        .get(&DataKey::Participant(ParticipantKey::AccumulatedFees(
-                            escrow.token.clone(),
-                        )))
-                        .unwrap_or(0);
-                    acc += fee_amount;
-                    env.storage().instance().set(
-                        &DataKey::Participant(ParticipantKey::AccumulatedFees(
-                            escrow.token.clone(),
-                        )),
-                        &acc,
-                    );
-                }
 
                 EscrowFeeCollected {
                     escrow_id,
@@ -9853,6 +9992,16 @@ impl EscrowContract {
             &dispute,
         );
 
+        // CEI: persist the final escrow status before any payout below.
+        escrow.status = if favor_merchant {
+            EscrowStatus::Released
+        } else {
+            EscrowStatus::Resolved
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)), &escrow);
+
         let token_client = token::Client::new(&env, &escrow.token);
         let contract_address = env.current_contract_address();
 
@@ -9865,7 +10014,6 @@ impl EscrowContract {
                     }
                 }
             }
-            escrow.status = EscrowStatus::Released;
         } else {
             // Refund to the participant with Customer role; fall back to proportional if none found
             let mut customer_addr: Option<Address> = None;
@@ -9888,12 +10036,7 @@ impl EscrowContract {
                     }
                 }
             }
-            escrow.status = EscrowStatus::Resolved;
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)), &escrow);
 
         MultiPartyDisputeResolved {
             escrow_id,
@@ -10280,9 +10423,7 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
 
-        // Child sub-account milestone ledgers are isolated from the parent.
-        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
-
+        // CEI: Cancelled status is persisted above before the refund transfer.
         EscrowContract::transfer_if_token_contract(
             &env,
             &escrow.token,
@@ -11086,6 +11227,14 @@ impl EscrowContract {
         let fee_amount = (sub.amount * fee_bps) / 10000;
         let merchant_amount = sub.amount - fee_amount;
 
+        // CEI: mark the sub-account released before any transfer so it cannot
+        // be paid out twice.
+        sub.released = true;
+        env.storage().instance().set(
+            &DataKey::Escrow(EscrowKey::SubAccount(escrow_id, sub_id)),
+            &sub,
+        );
+
         if fee_amount > 0 {
             let fee_config = Self::get_escrow_fee_config(env.clone());
             EscrowContract::transfer_if_token_contract(
@@ -11102,12 +11251,6 @@ impl EscrowContract {
             &escrow.merchant,
             merchant_amount,
         )?;
-
-        sub.released = true;
-        env.storage().instance().set(
-            &DataKey::Escrow(EscrowKey::SubAccount(escrow_id, sub_id)),
-            &sub,
-        );
 
         Ok(())
     }
@@ -11739,8 +11882,14 @@ mod appeal_expiry_test;
 
 #[cfg(test)]
 mod escalation_timeout_test;
+
+#[cfg(test)]
+mod escrow_status_guard_test;
 //
 // mod health_check_test;
 //
 // #[cfg(test)]
 // mod test_sub_account;
+
+#[cfg(test)]
+mod storage_ttl_test;
