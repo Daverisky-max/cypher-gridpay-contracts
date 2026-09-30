@@ -461,4 +461,21 @@ If no threshold has been configured, `get_escrow_health` and `get_stale_escrows`
 
 ---
 
+### Note to maintainers: observer unregistration (issue #34)
+
+`remove_observer` already unregisters observers safely: it performs a
+swap-remove against the last stored slot and clears the vacated storage
+key (`DataKey::Dispute(DisputeKey::Observer(escrow_id, last_index))`) via
+`env.storage().instance().remove(...)`, then updates `ObserverCount`
+accordingly. `verify_observer_access` and `get_observers` both read
+observer entries defensively through `Option`-returning storage gets, so
+a removed observer cannot leave a dangling pointer that panics other
+callers or ongoing escrows. No code change was required for the core
+acceptance criteria; a regression test,
+`test_remove_observer_does_not_leave_dangling_pointer_for_others`
+(see `observer_test.rs`), was added to lock in this behavior for a
+multi-observer escrow.
+
+---
+
 [⬅ Back to Main README](../../README.md)

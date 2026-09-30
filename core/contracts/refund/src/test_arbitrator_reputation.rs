@@ -78,10 +78,13 @@ fn create_and_escalate_refund(
         }
     });
 
-    // Request refund
+    // Request refund against a fresh payment each call: a payment may only
+    // have one active refund at a time.
+    static NEXT_PAYMENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let payment_id = NEXT_PAYMENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let refund_id = client.request_refund(
         merchant,
-        &1,
+        &payment_id,
         customer,
         &1000,
         &5000,
@@ -524,4 +527,160 @@ fn test_last_active_timestamp_updated() {
 
     // Timestamp should be updated
     assert!(updated_timestamp > initial_timestamp);
+}
+
+const DAY: u64 = 86_400;
+
+fn setup_decay_client<'a>(env: &'a Env, admin: &Address) -> RefundContractClient<'a> {
+    let contract_id = env.register(RefundContract, ());
+    let client = RefundContractClient::new(env, &contract_id);
+    client.initialize(admin);
+    client
+}
+
+#[test]
+fn test_reputation_decays_after_inactivity() {
+    let (env, admin, _, _, arbitrator1, _, _, _) = setup_test_env();
+    env.ledger().set_timestamp(1_000);
+    let client = setup_decay_client(&env, &admin);
+    client.register_arbitrator(&admin, &arbitrator1);
+    assert_eq!(
+        client
+            .get_arbitrator_reputation(&arbitrator1)
+            .unwrap()
+            .score,
+        100
+    );
+
+    // Exactly 60 days inactive: not yet "more than 60 days", no decay.
+    env.ledger().set_timestamp(1_000 + 60 * DAY);
+    assert_eq!(
+        client
+            .get_arbitrator_reputation(&arbitrator1)
+            .unwrap()
+            .score,
+        100
+    );
+
+    // Just past 60 days: one period of the default 10% decay.
+    env.ledger().set_timestamp(1_000 + 60 * DAY + 1);
+    assert_eq!(
+        client
+            .get_arbitrator_reputation(&arbitrator1)
+            .unwrap()
+            .score,
+        90
+    );
+
+    // Two full periods compound: 100 -> 90 -> 81.
+    env.ledger().set_timestamp(1_000 + 121 * DAY);
+    assert_eq!(
+        client
+            .get_arbitrator_reputation(&arbitrator1)
+            .unwrap()
+            .score,
+        81
+    );
+}
+
+#[test]
+fn test_reputation_decay_is_configurable() {
+    let (env, admin, _, _, arbitrator1, _, _, _) = setup_test_env();
+    env.ledger().set_timestamp(1_000);
+    let client = setup_decay_client(&env, &admin);
+    client.register_arbitrator(&admin, &arbitrator1);
+
+    // 25% per 30 days of inactivity.
+    client.set_reputation_decay_config(&admin, &2_500, &(30 * DAY));
+    assert_eq!(
+        client.get_reputation_decay_config(),
+        ReputationDecayConfig {
+            decay_bps: 2_500,
+            inactivity_period_secs: 30 * DAY,
+        }
+    );
+
+    // 61 days = 2 full periods: 100 -> 75 -> 56.
+    env.ledger().set_timestamp(1_000 + 61 * DAY);
+    assert_eq!(
+        client
+            .get_arbitrator_reputation(&arbitrator1)
+            .unwrap()
+            .score,
+        56
+    );
+
+    // Disabling decay restores the stored score (decay is not persisted by reads).
+    client.set_reputation_decay_config(&admin, &0, &(30 * DAY));
+    assert_eq!(
+        client
+            .get_arbitrator_reputation(&arbitrator1)
+            .unwrap()
+            .score,
+        100
+    );
+}
+
+#[test]
+fn test_reputation_decay_config_validation() {
+    let (env, admin, merchant, _, _, _, _, _) = setup_test_env();
+    let client = setup_decay_client(&env, &admin);
+
+    assert_eq!(
+        client.try_set_reputation_decay_config(&admin, &10_001, &DAY),
+        Err(Ok(Error::Ext(ExtError::InvalidReputationDecayConfig)))
+    );
+    assert_eq!(
+        client.try_set_reputation_decay_config(&admin, &1_000, &0),
+        Err(Ok(Error::Ext(ExtError::InvalidReputationDecayConfig)))
+    );
+    assert_eq!(
+        client.try_set_reputation_decay_config(&merchant, &1_000, &DAY),
+        Err(Ok(Error::Core(CoreError::Unauthorized)))
+    );
+}
+
+#[test]
+fn test_inactive_arbitrator_drops_in_assignment_priority() {
+    let (env, admin, _, _, arbitrator1, arbitrator2, _, _) = setup_test_env();
+    env.ledger().set_timestamp(1_000);
+    let client = setup_decay_client(&env, &admin);
+
+    // arbitrator1 registers first, then sits idle for 90 days.
+    client.register_arbitrator(&admin, &arbitrator1);
+    env.ledger().set_timestamp(1_000 + 90 * DAY);
+    client.register_arbitrator(&admin, &arbitrator2);
+
+    let top = client.get_top_arbitrators(&2);
+    assert_eq!(top.get(0).unwrap().arbitrator, arbitrator2);
+    assert_eq!(top.get(0).unwrap().score, 100);
+    assert_eq!(top.get(1).unwrap().arbitrator, arbitrator1);
+    assert_eq!(top.get(1).unwrap().score, 90);
+}
+
+#[test]
+fn test_decay_applied_before_new_case_outcome() {
+    let (env, admin, merchant, customer, arbitrator1, arbitrator2, arbitrator3, token_client) =
+        setup_test_env();
+    env.ledger().set_timestamp(1_000);
+    let client = setup_decay_client(&env, &admin);
+    client.register_arbitrator(&admin, &arbitrator1);
+    client.register_arbitrator(&admin, &arbitrator2);
+    client.register_arbitrator(&admin, &arbitrator3);
+
+    // Inactive for just over 60 days, then rule on a case in the majority.
+    env.ledger().set_timestamp(1_000 + 61 * DAY);
+    let case_id =
+        create_and_escalate_refund(&env, &client, &merchant, &customer, &admin, &token_client);
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.cast_arbitration_vote(&arbitrator1, &case_id, &true, &hash);
+    client.cast_arbitration_vote(&arbitrator2, &case_id, &true, &hash);
+    client.cast_arbitration_vote(&arbitrator3, &case_id, &true, &hash);
+    client.close_arbitration_case(&case_id);
+
+    // Decayed 100 -> 90 first, then +10 for the majority vote; the returning
+    // arbitrator does not regain their pre-inactivity score for free.
+    let rep = client.get_arbitrator_reputation(&arbitrator1).unwrap();
+    assert_eq!(rep.score, 100);
+    assert_eq!(rep.last_active, 1_000 + 61 * DAY);
 }

@@ -1,5 +1,17 @@
 # Glossary
 
+## Admin Orchestrator
+
+The top-level coordinator contract located in `orchestrator/contracts/admin` that manages cross-contract operations, emergency pauses, dynamic address updates, and access control across the Payment, Escrow, and Refund contracts.
+
+## Arbitrator
+
+A registered, trusted entity or account capable of resolving disputed escrows and appeals within the refund contract. Arbitrators maintain on-chain reputation scores and can be subject to stake slashing for fraudulent or non-responsive rulings.
+
+## Circuit Breaker
+
+An automated safety mechanism that halts contract state changes or limits transaction volume when certain volatility or aggregate refund thresholds are breached within a rolling window.
+
 ## Clawback
 
 An admin-controlled emergency fund-recovery mechanism for the escrow contract. When normal resolution paths (release, dispute, refund) are unavailable — for example, due to fraud, a compliance hold, or an irrecoverable deadlock — a multisig admin can forcibly recover the full escrow balance and transfer it to their own address.
@@ -23,67 +35,76 @@ Clawback follows a strict three-phase sequence:
 
 ### Error reference
 
-| Error                                | Cause                                                                                                     |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `BasicError::NotAnAdmin`             | Caller is not in the multisig admin set                                                                   |
-| `EscrowError::ClawbackDelayTooShort` | `delay_seconds < 86,400`                                                                                  |
-| `EscrowError::NotFound`              | Target escrow does not exist                                                                              |
-| `EscrowError::AlreadyProcessed`      | A live clawback request already exists for this escrow (on initiate), or the request was already executed |
-| `EscrowError::InvalidStatus`         | Request was already cancelled (on execute)                                                                |
-| `EscrowError::TimelockNotElapsed`    | Execution attempted before `execute_after` timestamp                                                      |
-| `BasicError::Unauthorized`           | `request_id` not found in storage                                                                         |
+| Error | Cause |
+|-------|-------|
+| `AlreadyProcessed` | A clawback request for this escrow is already active |
+| `NotReady` | The mandatory delay has not yet elapsed |
+| `Unauthorized` | Caller is not a registered admin |
 
-## Escrow
+---
 
-A smart contract that locks funds between a customer and a merchant while a transaction is pending, disputed, or held. Escrows track status through a lifecycle of Locked, Released, Disputed, Resolved, and Cancelled.
+## Core Protocol Terms
 
-## Finality Delay
+### Escrow
 
-A payment-settlement feature that holds merchant funds for a configurable period after payment completion before releasing them. Payments below a configurable `min_amount_threshold` bypass the delay and settle immediately.
+A smart contract mechanism that holds tokens in escrow until predefined conditions are met. In Cypher GridPay, escrows are created when a customer initiates a payment and are released to the merchant upon completion or refunded to the customer if the payment is cancelled or disputed.
 
-## Hold Period
+### Payment Channel
 
-A mandatory buyer inspection period enforced during escrow creation. The hold period is a duration (in seconds) that specifies how long a buyer has to inspect goods or services after an escrow is locked. The escrow cannot be released or refunded until the hold period elapses. This protects the buyer by giving them time to verify the transaction before merchant release is possible.
+An off-chain mechanism for high-frequency micropayments between two parties. Balance updates are signed off-chain and only the final state is submitted on-chain. Each update includes a sequence number to prevent replay attacks.
 
-The hold period duration is converted to an absolute timestamp (`hold_period_until`) stored on the escrow at creation time. If a release is attempted before `hold_period_until`, the contract returns `EscrowError::HoldPeriodActive`.
+### Settlement
 
-## Horizon
+The process of converting a locked payment into a final transfer to the merchant. Settlement occurs when the payment is completed by an admin, triggering the release of escrowed funds minus any applicable fees.
 
-The Stellar network's HTTP API used by off-chain services to subscribe to ledger events (such as `EscrowCreated`), enabling real-time notifications without polling.
+### Multi-Sig (Multi-Signature)
 
-## Timelock
+A security mechanism requiring multiple authorized signatures before executing sensitive operations. The Cypher GridPay protocol uses configurable multi-sig thresholds for admin operations like fee sweeps, contract pause, and admin changes.
 
-A security delay enforced on administrative actions in the escrow contract. When an admin queues an action (such as resolving a dispute or forcing a release), the action is subject to a configurable timelock delay before it can be executed. This delay protects against unauthorized or hasty administrative decisions by giving stakeholders time to react.
+### Fee Sweep
 
-The timelock duration is configured globally via `TimeLockConfig` (with a default delay and grace period). When an action is queued, the contract calculates `executable_after = now + delay`. If execution is attempted before `executable_after`, the contract returns `EscrowError::TimelockNotElapsed`.
+The accumulated protocol fees (from payment processing) that can be withdrawn by authorized admins. Sweeps are strictly limited to the accumulated fee balance and cannot touch merchant escrowed or unfinalized funds.
 
-### Semantic Distinction from Hold Period
+### Rate Limit
 
-- **Hold Period**: Protects the buyer during normal escrow lifecycle; applies to buyer-initiated refunds and normal release paths.
-- **Timelock**: Protects against admin misbehaviour; applies only to admin-queued actions that bypass normal flow (disputes, forced release).
+A sliding-window mechanism that restricts the number of payments a single address can create within a given time period. Rate limits prevent ledger spam and denial-of-service attacks.
 
-Together they form a two-tier security model: buyers can inspect (hold period), and admins must wait (timelock) before acting.
+### Circuit Breaker
 
-## Multisig
+An automatic halt mechanism that pauses contract operations when anomalous conditions are detected (e.g., excessive refund volume, oracle failure). Circuit breakers protect funds during potential attack scenarios.
 
-Multi-signature governance model used for admin operations across contracts. Actions require a configurable number of approvals from an admin set before they execute, following a proposal-based workflow.
+### Arbitration
 
-## Reason Code
+A dispute resolution process where a neutral third party (arbitrator) evaluates evidence from both sides and determines the outcome of a refund or escrow dispute. Arbitration requires staking and has time-bound deadlines.
 
-A type-safe enum (`RefundReasonCode`) that categorises refunds into structured reasons: `ProductDefect`, `NonDelivery`, `DuplicateCharge`, `Unauthorized`, `CustomerRequest`, and `Other`.
+### Vesting Schedule
 
-## Spend Limits
+A time-based release mechanism for escrowed funds. Vesting schedules can be linear, cliff-based, or custom, and can be accelerated by authorized parties under specific conditions.
 
-Per-customer rolling spending caps enforced during payment creation. Each limit specifies a maximum amount within a configurable time window; the counter resets when the window elapses.
+### Schema Version
 
-## Sub-Account
+A numeric identifier stored in contract storage that tracks the current data layout version. Schema versioning enables safe data migrations when contract logic is upgraded.
 
-A labelled partition of an escrow that can be funded and released independently. A parent escrow cannot be fully released until all its sub-accounts have been released.
+### Checks-Effects-Interactions
 
-## Threshold
+A security pattern where all state checks are performed first, then state changes are applied, and finally external calls are made. This pattern prevents reentrancy attacks.
 
-A configurable minimum value used in multiple contexts: the number of multisig approvals required to execute a proposal, the cumulative weight (in basis points) needed to release a multi-party escrow, or an inactivity period before reputation decay begins.
+### Reentrancy
 
-## WASM
+An attack where a malicious contract calls back into the original contract before the first invocation completes, potentially manipulating state or draining funds. Prevented by following the Checks-Effects-Interactions pattern.
 
-WebAssembly — the compiled bytecode format (`.wasm`) to which Soroban smart contracts are compiled for deployment on the Stellar network, using the `wasm32-unknown-unknown` Rust target.
+### Front-Running
+
+The practice of observing pending transactions in the mempool and submitting a competing transaction with higher gas to execute first. In Cypher GridPay, front-running mitigations include admin authorization requirements and deadline extensions for dispute evidence.
+
+### Griefing
+
+An attack where an attacker causes inconvenience or financial loss to other users without direct benefit to themselves. Examples include submitting frivolous disputes or spamming the ledger.
+
+### Oracle
+
+An external data source that provides information to smart contracts, such as token price feeds. Cypher GridPay uses oracles for currency conversion and includes staleness checks to prevent manipulation.
+
+### Deadline Extension
+
+An automatic extension of dispute evidence submission deadlines when new evidence is submitted close to the deadline. This prevents front-running attacks on evidence submission.
