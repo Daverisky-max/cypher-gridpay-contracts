@@ -4612,6 +4612,55 @@ fn test_escrow_fee_deduction_and_withdrawal() {
 }
 
 #[test]
+fn test_withdraw_escrow_fees_unauthorized_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token_asset_client = token::StellarAssetClient::new(&env, &token_id);
+
+    client.initialize(&admin);
+
+    token_asset_client.mint(&contract_id, &10000);
+
+    let config = EscrowFeeConfig {
+        fee_bps: 500,
+        fee_recipient: contract_id.clone(),
+        enabled: true,
+    };
+    client.set_escrow_fee_config(&admin, &config);
+
+    env.ledger().set_timestamp(1000);
+    let escrow_id = client.create_escrow(
+        &customer,
+        &merchant,
+        &10000_i128,
+        &token_id,
+        &2000_u64,
+        &0_u64,
+    );
+
+    env.ledger().set_timestamp(2500);
+    client.release_escrow(&admin, &escrow_id, &false);
+
+    assert_eq!(client.get_accumulated_escrow_fees(&token_id), 500);
+
+    let external_wallet = Address::generate(&env);
+    let result = client.try_withdraw_escrow_fees(&attacker, &token_id, &external_wallet);
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_escrow_fee_zero_bps_path() {
     let env = Env::default();
     env.mock_all_auths();

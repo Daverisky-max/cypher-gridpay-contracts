@@ -1847,6 +1847,7 @@ impl EscrowContract {
         admin: Address,
         token: Address,
         to: Address,
+        amount: i128,
     ) -> Result<i128, Error> {
         admin.require_auth();
         Self::require_not_paused(&env, "withdraw_escrow_fees")?;
@@ -1855,22 +1856,24 @@ impl EscrowContract {
             return Err(Error::Basic(BasicError::NotAnAdmin));
         }
 
-        let amount: i128 = env
+        let accumulated: i128 = env
             .storage()
             .instance()
             .get(&DataKey::Participant(ParticipantKey::AccumulatedFees(
                 token.clone(),
             )))
             .unwrap_or(0);
-        if amount == 0 {
-            return Ok(0);
+        if amount <= 0 || amount > accumulated {
+            return Err(Error::Basic(BasicError::Unauthorized));
         }
 
         // CEI: zero the accumulated balance before transferring it out.
         env.storage().instance().set(
             &DataKey::Participant(ParticipantKey::AccumulatedFees(token.clone())),
-            &0i128,
+            &(accumulated - amount),
         );
+        Self::transfer_if_token_contract(&env, &token, &to, amount)?;
+
         Self::transfer_if_token_contract(&env, &token, &to, amount)?;
 
         EscrowFeesWithdrawn {
