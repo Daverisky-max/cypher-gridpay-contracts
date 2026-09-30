@@ -199,6 +199,7 @@ pub enum ActionError {
     EvidenceDeadlinePassed = 313,
     ApprovalsThresholdNotMet = 314,
     InsufficientCollateral = 315,
+    CrossContractInvocationFailed = 316,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
