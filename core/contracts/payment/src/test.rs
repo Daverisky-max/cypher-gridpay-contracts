@@ -7687,3 +7687,42 @@ fn test_recurring_billing_blocked_when_merchant_paused_mid_cycle() {
     assert_eq!(sub.status, SubscriptionStatus::Active);
     assert_eq!(sub.payment_count, 1);
 }
+
+#[test]
+fn test_protocol_balance_conservation_invariant() {
+    let env = Env::default();
+    let contract_id = env.register(PaymentContract, ());
+    let client = PaymentContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+    let meta = String::from_str(&env, "");
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    // Initial state: 0 balance, 0 liabilities
+    let initial_balance = client.get_accumulated_balance(&merchant);
+    assert_eq!(initial_balance, 0);
+
+    // Create payment
+    let payment_id = client.create_payment(
+        &customer,
+        &merchant,
+        &500_i128,
+        &token,
+        &Currency::USDC,
+        &0_u64,
+        &meta,
+    );
+
+    let payment = client.get_payment(&payment_id);
+    assert_eq!(payment.amount, 500);
+    assert_eq!(payment.status, PaymentStatus::Pending);
+
+    // Invariant check: In Pending status without installments, liabilities match 0 on-chain tokens
+    assert_eq!(client.get_accumulated_balance(&merchant), 0);
+}
+

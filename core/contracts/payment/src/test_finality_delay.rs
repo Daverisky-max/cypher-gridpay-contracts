@@ -67,7 +67,7 @@ fn test_complete_payment_creates_pending_settlement() {
     );
     client.complete_payment(&admin, &payment_id);
 
-    let settlements = client.get_pending_settlements(&merchant);
+    let settlements = client.get_pending_settlements(&merchant, &10, &0);
     assert_eq!(settlements.len(), 1);
     assert_eq!(settlements.get(0).unwrap().payment_id, payment_id);
 }
@@ -184,6 +184,6 @@ fn test_threshold_bypass_settles_immediately() {
     client.complete_payment(&admin, &payment_id);
 
     // No pending settlement created for below-threshold payment
-    let settlements = client.get_pending_settlements(&merchant);
+    let settlements = client.get_pending_settlements(&merchant, &10, &0);
     assert_eq!(settlements.len(), 0);
 }
