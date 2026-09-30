@@ -2,6 +2,7 @@
 
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token, Address, Env,
 };
@@ -28,6 +29,32 @@ fn setup() -> (
     let token_admin = token::StellarAssetClient::new(&env, &token);
     token_admin.mint(&customer, &1_000_000);
     (env, client, admin, customer, merchant, token)
+}
+
+// ── Mock payment contract for cross-contract failure simulation ───────────────
+
+#[contract]
+pub struct MockPaymentContract;
+
+#[contractimpl]
+impl MockPaymentContract {
+    pub fn notify_payment(_env: Env, _escrow_id: u64, _amount: i128) {
+        panic!("external payment contract failure");
+    }
+}
+
+#[test]
+fn test_cross_contract_invocation_failure_reverts_state() {
+    let (env, client, _admin, customer, merchant, token) = setup();
+
+    env.ledger().set_timestamp(1000);
+    let escrow_id =
+        client.create_escrow(&customer, &merchant, &1000_i128, &token, &5000_u64, &0_u64, &0_u64, &false);
+
+    let mock_id = env.register(MockPaymentContract, ());
+    let result = client.try_notify_payment_contract(&escrow_id, &mock_id);
+    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::CrossContractInvocationFailed))));
+    assert_eq!(client.get_escrow_status(&escrow_id), EscrowStatus::Locked);
 }
 
 // ── is_escrow_released ────────────────────────────────────────────────────────
