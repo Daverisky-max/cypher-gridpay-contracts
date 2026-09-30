@@ -104,6 +104,8 @@ pub enum DataKey {
     AppealWindowSeconds,
     // Issue #389: two-step admin rotation
     PendingAdmin,
+    // Issue #61: VIP tier policy verification for instant refund approval
+    VipTierPolicy(Address, u32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -686,6 +688,9 @@ pub struct RefundVoucher {
     pub issued_at: u64,
     pub expires_at: u64,
     pub redeemed: bool,
+    // Issue #60: tracks partial redemptions; starts equal to `amount` and is
+    // decremented as the customer redeems partial amounts across purchases.
+    pub remaining_balance: i128,
 }
 
 // Issue #194: Tiered arbitration escalation
@@ -1321,6 +1326,10 @@ pub struct CircuitBreakerConfig {
     pub measurement_window_seconds: u64,
     pub cooldown_seconds: u64,
     pub enabled: bool,
+    // Issue #59: absolute rolling refund volume threshold within the
+    // measurement window. `0` disables the absolute-volume check and leaves
+    // only the rate-based (`max_refund_rate_bps`) trip condition active.
+    pub max_refund_volume: i128,
 }
 
 #[derive(Clone)]
@@ -6509,7 +6518,13 @@ impl RefundContract {
             .unwrap_or(0);
         let refund_id = counter + 1;
 
-        let initial_status = if force_approved {
+        // Issue #61: VIP tier customers with a verified, admin-assigned tier that the
+        // merchant has flagged as VIP are routed straight to `Approved` for instant
+        // refunds, since `validate_against_policy` above already enforced their
+        // tier-specific refund cap.
+        let is_vip_tier_customer = Self::is_vip_tier_customer(&env, &merchant, &customer);
+
+        let initial_status = if force_approved || is_vip_tier_customer {
             RefundStatus::Approved
         } else {
             let effective_merchant = if let Some(policy) =
@@ -7467,7 +7482,12 @@ impl RefundContract {
 
         let rate_bps = ((new_refund_vol * 10000) / new_payment_vol) as u32;
 
-        if rate_bps > config.max_refund_rate_bps {
+        // Issue #59: trip on absolute rolling refund volume exceeding the
+        // configured threshold, independent of the rate-based check above.
+        let volume_exceeded =
+            config.max_refund_volume > 0 && new_refund_vol > config.max_refund_volume;
+
+        if rate_bps > config.max_refund_rate_bps || volume_exceeded {
             state.tripped = true;
             state.tripped_at = Some(now);
             state.trip_count += 1;
@@ -9418,6 +9438,7 @@ impl RefundContract {
             issued_at: now,
             expires_at: now.saturating_add(expiry_seconds),
             redeemed: false,
+            remaining_balance: refund.amount,
         };
 
         env.storage()
@@ -9492,6 +9513,69 @@ impl RefundContract {
         );
 
         voucher.redeemed = true;
+        voucher.remaining_balance = 0;
+        env.storage()
+            .instance()
+            .set(&VoucherKey::Voucher(voucher_id), &voucher);
+
+        Ok(())
+    }
+
+    /// Partially (or fully) redeem a store credit voucher, allowing a customer to
+    /// spread a single voucher's balance across multiple purchases.
+    ///
+    /// # Arguments
+    /// * `customer` - The customer redeeming the voucher (must authenticate).
+    /// * `voucher_id` - The ID of the voucher to redeem from.
+    /// * `amount` - The amount to redeem from the voucher's remaining balance.
+    ///
+    /// # Errors
+    /// Returns `VoucherNotFound` if the voucher does not exist.
+    /// Returns `Unauthorized` if the caller is not the voucher's customer.
+    /// Returns `VoucherAlreadyRedeemed` if the voucher's balance is already exhausted.
+    /// Returns `VoucherExpired` if the voucher has expired.
+    /// Returns `InvalidAmount` if `amount` is not positive or exceeds the remaining balance.
+    pub fn redeem_voucher(
+        env: Env,
+        customer: Address,
+        voucher_id: u64,
+        amount: i128,
+    ) -> Result<(), Error> {
+        customer.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::Core(CoreError::InvalidAmount));
+        }
+
+        let mut voucher: RefundVoucher = env
+            .storage()
+            .instance()
+            .get(&VoucherKey::Voucher(voucher_id))
+            .ok_or(Error::Ext(ExtError::VoucherNotFound))?;
+
+        if voucher.customer != customer {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if voucher.redeemed || voucher.remaining_balance <= 0 {
+            return Err(Error::Ext(ExtError::VoucherAlreadyRedeemed));
+        }
+        if env.ledger().timestamp() > voucher.expires_at {
+            return Err(Error::Ext(ExtError::VoucherExpired));
+        }
+        if amount > voucher.remaining_balance {
+            return Err(Error::Core(CoreError::InvalidAmount));
+        }
+
+        token::Client::new(&env, &voucher.token).transfer(
+            &env.current_contract_address(),
+            &customer,
+            &amount,
+        );
+
+        voucher.remaining_balance -= amount;
+        if voucher.remaining_balance == 0 {
+            voucher.redeemed = true;
+        }
         env.storage()
             .instance()
             .set(&VoucherKey::Voucher(voucher_id), &voucher);
@@ -9918,6 +10002,43 @@ impl RefundContract {
             .instance()
             .set(&DataKey::CustomerTier(customer), &tier_id);
         Ok(())
+    }
+
+    /// Mark whether a given customer tier qualifies for VIP instant refund approval
+    /// under a merchant's refund policy.
+    ///
+    /// # Arguments
+    /// * `merchant` - The merchant configuring the VIP tier (must authenticate).
+    /// * `tier_id` - The customer tier level being flagged.
+    /// * `is_vip` - Whether the tier qualifies for automatic instant approval.
+    pub fn set_vip_tier_policy(
+        env: Env,
+        merchant: Address,
+        tier_id: u32,
+        is_vip: bool,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::VipTierPolicy(merchant, tier_id), &is_vip);
+        Ok(())
+    }
+
+    /// Check whether the given customer's verified tier assignment is flagged as a
+    /// VIP tier by the merchant, qualifying the refund for automatic instant approval.
+    fn is_vip_tier_customer(env: &Env, merchant: &Address, customer: &Address) -> bool {
+        let tier_id_opt: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CustomerTier(customer.clone()));
+        match tier_id_opt {
+            Some(tier_id) => env
+                .storage()
+                .instance()
+                .get(&DataKey::VipTierPolicy(merchant.clone(), tier_id))
+                .unwrap_or(false),
+            None => false,
+        }
     }
 
     /// Get the tier level assigned to a customer.
