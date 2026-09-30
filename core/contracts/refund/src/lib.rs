@@ -358,6 +358,9 @@ pub enum ExtError {
     NoPendingAdmin = 59,
     /// Caller is not the nominated pending administrator. Resolution: accept_admin() must be called by nominee.
     NotPendingAdmin = 60,
+    // Issue #88: a data migration step failed, so the schema version must not
+    // be bumped (the whole transaction is reverted).
+    SchemaMigrationFailed = 61,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -422,15 +425,23 @@ impl TryFromVal<Env, Val> for Error {
     }
 }
 
+/// Issue #72: dashboard-facing lifecycle events.
+///
+/// Every event carries the `customer`, `merchant`, `refund_id` and the
+/// canonical `reason_code` so customer and merchant dashboards can render
+/// refund requests, approvals, denials and appeals in real time without
+/// re-reading contract state.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundRequested {
+pub struct RefundRequestedEvent {
     pub refund_id: u64,
     pub payment_id: u64,
-    pub merchant: Address,
     pub customer: Address,
+    pub merchant: Address,
     pub amount: i128,
     pub token: Address,
+    pub reason_code: RefundReasonCode,
+    pub requested_at: u64,
 }
 
 #[contractevent]
@@ -461,18 +472,25 @@ pub struct TriggerRegistered {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundApproved {
+pub struct RefundApprovedEvent {
     pub refund_id: u64,
     pub payment_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
     pub amount: i128,
+    pub reason_code: RefundReasonCode,
     pub approved_by: Address,
     pub approved_at: u64,
 }
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundRejected {
+pub struct RefundDeniedEvent {
     pub refund_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub reason_code: RefundReasonCode,
     pub rejected_by: Address,
     pub rejected_at: u64,
     pub rejection_reason: String,
@@ -480,10 +498,14 @@ pub struct RefundRejected {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppealFiled {
+pub struct AppealFiledEvent {
     pub appeal_id: u64,
     pub refund_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
     pub appellant: Address,
+    pub reason_code: RefundReasonCode,
+    pub filed_at: u64,
 }
 
 #[contractevent]
@@ -1397,6 +1419,33 @@ pub struct AdminRotationAccepted {
     pub new_admin: Address,
 }
 
+// Gas estimation constants used by the dry-run migration helper (Issue #89).
+// These model the dominant cost drivers of a schema migration: a fixed base
+// cost for opening the migration plus a per-record cost for converting each
+// stored record to the new schema layout.
+const MIGRATION_BASE_GAS: u64 = 50_000;
+const MIGRATION_GAS_PER_RECORD: u64 = 1_500;
+
+/// Read-only impact report produced by [`RefundContract::dry_run_migrate_schema`].
+///
+/// The report lets admins estimate the cost and blast radius of a schema
+/// migration on mainnet or testnet without committing irreversible storage
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MigrationReport {
+    /// Schema version recorded before the migration.
+    pub current_version: u32,
+    /// Schema version the migration would move storage to.
+    pub target_version: u32,
+    /// Number of stored records that would be converted by the migration.
+    pub converted_records: u64,
+    /// Estimated gas, in instructions, the migration would consume.
+    pub gas_estimate: u64,
+    /// Always `true` for dry-run reports, distinguishing them from real runs.
+    pub dry_run: bool,
+}
+
 #[contract]
 pub struct RefundContract;
 
@@ -1404,6 +1453,17 @@ pub struct RefundContract;
 impl RefundContract {
     const BATCH_DECISION_LIMIT: u32 = 50;
     const INITIAL_SCHEMA_VERSION: u32 = 1;
+
+    /// Maximum number of records a single paginated query may return (Issue #87).
+    ///
+    /// Requesting more than this is silently clamped so a caller can never ask
+    /// for a result set that would exceed Soroban's ledger entry size limit.
+    const MAX_QUERY_PAGE_SIZE: u64 = 100;
+
+    /// Clamps a caller supplied page size to `MAX_QUERY_PAGE_SIZE`.
+    fn clamp_page_size(limit: u64) -> u64 {
+        core::cmp::min(limit, Self::MAX_QUERY_PAGE_SIZE)
+    }
 
     /// Initialize the refund contract with an admin address.
     ///
@@ -1461,6 +1521,13 @@ impl RefundContract {
 
     /// Migrate the contract schema to a new version.
     ///
+    /// Every data transformation registered for the versions between the
+    /// current schema version and `target_version` is executed **before**
+    /// `target_version` is written to storage. If a single refund record cannot
+    /// be migrated the call returns `Error::Ext(ExtError::SchemaMigrationFailed)`
+    /// and the whole transaction is reverted, so the stored version can never be
+    /// bumped on top of partially migrated (or corrupted) state.
+    ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized and match stored admin).
     /// * `target_version` - The target schema version to migrate to.
@@ -1468,6 +1535,8 @@ impl RefundContract {
     /// # Errors
     /// Returns `Unauthorized` if the caller is not the admin.
     /// Returns `SchemaAlreadyAtTarget` if the current version is already at or past the target.
+    /// Returns `SchemaMigrationFailed` if a data migration step failed, leaving the
+    /// stored version untouched.
     pub fn migrate_schema(env: Env, admin: Address, target_version: u32) -> Result<(), Error> {
         admin.require_auth();
         let stored_admin: Address = env
@@ -1484,10 +1553,49 @@ impl RefundContract {
             return Err(Error::Ext(ExtError::SchemaAlreadyAtTarget));
         }
 
+        // Issue #88: run every data migration first. `target_version` is only
+        // persisted once all transformations have completed successfully.
+        Self::run_data_migrations(&env, current, target_version)?;
+
         env.storage()
             .instance()
             .set(&SystemKey::SchemaVersion, &target_version);
         Ok(())
+    }
+
+    /// Simulates a schema migration and returns an impact report without
+    /// modifying any storage (Issue #89).
+    ///
+    /// The report includes the number of records that would be converted and a
+    /// gas estimate for the migration, letting admins rehearse the migration
+    /// against a live deployment before executing it for real.
+    ///
+    /// This function is read-only: calling it repeatedly with the same target
+    /// version returns an identical report and never advances the schema
+    /// version.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `target_version` - The schema version the migration would move storage to.
+    ///
+    /// # Returns
+    /// A `MigrationReport` describing the migration impact.
+    pub fn dry_run_migrate_schema(env: Env, target_version: u32) -> MigrationReport {
+        let current_version = Self::get_schema_version(env.clone());
+        let refund_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundCounter)
+            .unwrap_or(0);
+        let gas_estimate = MIGRATION_BASE_GAS
+            .saturating_add(MIGRATION_GAS_PER_RECORD.saturating_mul(refund_count));
+        MigrationReport {
+            current_version,
+            target_version,
+            converted_records: refund_count,
+            gas_estimate,
+            dry_run: true,
+        }
     }
 
     /// Propose a new admin, starting a two-step rotation (Issue #389).
@@ -1660,7 +1768,7 @@ impl RefundContract {
 
     /// Approve a pending refund request.
     ///
-    /// Changes the refund status from `Requested` to `Approved` and emits a `RefundApproved` event.
+    /// Changes the refund status from `Requested` to `Approved` and emits a `RefundApprovedEvent` event.
     ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized).
@@ -1681,7 +1789,7 @@ impl RefundContract {
     /// Reject a pending refund request.
     ///
     /// Moves the refund to `PendingAppeal` status with an appeal window, and emits a
-    /// `RefundRejected` event. The customer can file an appeal within the appeal window.
+    /// `RefundDeniedEvent` event. The customer can file an appeal within the appeal window.
     ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized).
@@ -1707,7 +1815,7 @@ impl RefundContract {
     /// Finalize a denied refund after its appeal window has expired.
     ///
     /// Moves the refund from `PendingAppeal` to `Rejected` status if the appeal window
-    /// has elapsed, and emits a `RefundRejected` event.
+    /// has elapsed, and emits a `RefundDeniedEvent` event.
     ///
     /// # Arguments
     /// * `refund_id` - The ID of the refund to finalize.
@@ -1753,8 +1861,12 @@ impl RefundContract {
             .clone()
             .unwrap_or(env.current_contract_address());
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by,
             rejected_at: now,
             rejection_reason: soroban_sdk::String::from_str(&env, "appeal window expired"),
@@ -1800,8 +1912,12 @@ impl RefundContract {
             .set(&DataKey::Refund(refund_id), &refund);
         Self::add_to_status_index(env, RefundStatus::PendingAppeal, refund_id);
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by: admin,
             rejected_at: now,
             rejection_reason,
@@ -1813,7 +1929,7 @@ impl RefundContract {
 
     /// File an appeal against a rejected or pending-appeal refund.
     ///
-    /// Creates a new appeal record and emits an `AppealFiled` event. The customer
+    /// Creates a new appeal record and emits an `AppealFiledEvent` event. The customer
     /// must be the refund's customer and the refund must be in a rejected/pending-appeal state.
     ///
     /// # Arguments
@@ -1921,10 +2037,14 @@ impl RefundContract {
             &(customer_count + 1),
         );
 
-        (AppealFiled {
+        (AppealFiledEvent {
             appeal_id,
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
             appellant: customer,
+            reason_code: refund.reason_code.clone(),
+            filed_at: env.ledger().timestamp(),
         })
         .publish(&env);
 
@@ -2051,23 +2171,59 @@ impl RefundContract {
             .ok_or(Error::Core(CoreError::RefundNotFound))
     }
 
-    /// Get all appeals filed by a specific customer.
+    /// Get a page of appeals filed by a specific customer.
+    ///
+    /// Each appeal lives in its own ledger entry under
+    /// `SystemKey::Appeal(appeal_id)`, indexed per customer through
+    /// `SystemKey::AppealByCustomer(customer, index)`. Queries are paginated
+    /// and the page size is capped at `MAX_QUERY_PAGE_SIZE` (Issue #87), so a
+    /// customer with an arbitrarily long appeal history can never return a
+    /// result set larger than a single ledger entry.
     ///
     /// # Arguments
     /// * `customer` - The customer address to query appeals for.
+    /// * `limit` - Maximum number of appeals to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of `RefundAppeal` records filed by the customer.
-    pub fn get_appeals_by_customer(env: Env, customer: Address) -> Vec<RefundAppeal> {
-        let mut appeals = Vec::new(&env);
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&SystemKey::AppealByCustomerCount(customer.clone()))
-            .unwrap_or(0);
+    /// A vector of at most `limit` `RefundAppeal` records filed by the customer,
+    /// oldest first. Empty when `limit` is `0` or `offset` is out of range.
+    pub fn get_appeals_by_customer(
+        env: Env,
+        customer: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<RefundAppeal> {
+        Self::get_appeals_by_customer_internal(&env, &customer, limit, offset)
+    }
 
-        let mut index = 0u64;
-        while index < count {
+    /// Number of appeals filed by a customer.
+    ///
+    /// Use this with [`Self::get_appeals_by_customer`] to page through the full
+    /// appeal history.
+    pub fn get_appeal_count_by_customer(env: Env, customer: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&SystemKey::AppealByCustomerCount(customer))
+            .unwrap_or(0)
+    }
+
+    fn get_appeals_by_customer_internal(
+        env: &Env,
+        customer: &Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<RefundAppeal> {
+        let mut appeals = Vec::new(env);
+        let count = Self::get_appeal_count_by_customer(env.clone(), customer.clone());
+        if limit == 0 || offset >= count {
+            return appeals;
+        }
+
+        let end = core::cmp::min(count, offset.saturating_add(Self::clamp_page_size(limit)));
+        let mut index = offset;
+        while index < end {
             if let Some(appeal_id) = env
                 .storage()
                 .instance()
@@ -2970,10 +3126,13 @@ impl RefundContract {
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
 
-            (RefundApproved {
+            (RefundApprovedEvent {
                 refund_id: case.refund_id,
                 payment_id: refund.payment_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
                 amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 approved_by: env.current_contract_address(),
                 approved_at: env.ledger().timestamp(),
             })
@@ -2991,8 +3150,12 @@ impl RefundContract {
             Self::add_to_status_index(&env, RefundStatus::Rejected, refund.id);
             Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
 
-            (RefundRejected {
+            (RefundDeniedEvent {
                 refund_id: case.refund_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
+                amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 rejected_by: env.current_contract_address(),
                 rejected_at: refund.rejected_at.unwrap(),
                 rejection_reason: soroban_sdk::String::from_str(
@@ -3383,10 +3546,13 @@ impl RefundContract {
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
 
-            (RefundApproved {
+            (RefundApprovedEvent {
                 refund_id: case.refund_id,
                 payment_id: refund.payment_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
                 amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 approved_by: env.current_contract_address(),
                 approved_at: env.ledger().timestamp(),
             })
@@ -3975,7 +4141,8 @@ impl RefundContract {
     ///
     /// # Arguments
     /// * `status` - The refund status to filter by.
-    /// * `limit` - Maximum number of results to return.
+    /// * `limit` - Maximum number of results to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
     /// * `offset` - Number of results to skip for pagination.
     ///
     /// # Returns
@@ -3993,7 +4160,7 @@ impl RefundContract {
             return results;
         }
 
-        let end = core::cmp::min(total, offset.saturating_add(limit));
+        let end = core::cmp::min(total, offset.saturating_add(Self::clamp_page_size(limit)));
         let mut index = offset;
         while index < end {
             if let Some(refund_id) = env
@@ -4019,7 +4186,8 @@ impl RefundContract {
     ///
     /// # Arguments
     /// * `merchant` - The merchant address to query.
-    /// * `limit` - Maximum number of results to return.
+    /// * `limit` - Maximum number of results to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
     /// * `offset` - Number of results to skip for pagination.
     ///
     /// # Returns
@@ -4037,7 +4205,7 @@ impl RefundContract {
             return results;
         }
 
-        let end = core::cmp::min(total, offset.saturating_add(limit));
+        let end = core::cmp::min(total, offset.saturating_add(Self::clamp_page_size(limit)));
         let mut index = offset;
         while index < end {
             if let Some(refund_id) = env
@@ -4064,7 +4232,8 @@ impl RefundContract {
     /// # Arguments
     /// * `merchant` - The merchant address to query.
     /// * `status` - The refund status to filter by.
-    /// * `limit` - Maximum number of results to return.
+    /// * `limit` - Maximum number of results to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
     /// * `offset` - Number of results to skip for pagination.
     ///
     /// # Returns
@@ -4079,21 +4248,32 @@ impl RefundContract {
         Self::get_merchant_refunds_by_status_internal(&env, &merchant, status, limit, offset)
     }
 
-    /// Get all pending (requested) refunds for a merchant.
+    /// Get a page of pending (requested) refunds for a merchant.
+    ///
+    /// Paginated with the page size capped at `MAX_QUERY_PAGE_SIZE`
+    /// (Issue #87) so a merchant with a long refund backlog cannot return a
+    /// result set larger than a single ledger entry.
     ///
     /// # Arguments
     /// * `merchant` - The merchant address to query.
+    /// * `limit` - Maximum number of refunds to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of all `Refund` entries in `Requested` status for the merchant.
-    pub fn get_merchant_pending_refunds(env: Env, merchant: Address) -> Vec<Refund> {
-        let total = Self::get_merchant_refund_count(&env, &merchant);
+    /// A vector of at most `limit` `Refund` entries in `Requested` status.
+    pub fn get_merchant_pending_refunds(
+        env: Env,
+        merchant: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<Refund> {
         Self::get_merchant_refunds_by_status_internal(
             &env,
             &merchant,
             RefundStatus::Requested,
-            total,
-            0,
+            limit,
+            offset,
         )
     }
 
@@ -5696,7 +5876,7 @@ impl RefundContract {
             status: initial_status.clone(),
             requested_at: env.ledger().timestamp(),
             reason,
-            reason_code,
+            reason_code: reason_code.clone(),
             // Issue #147: Initialize lifecycle timestamps
             approved_at: if initial_status == RefundStatus::Approved {
                 Some(env.ledger().timestamp())
@@ -5752,13 +5932,15 @@ impl RefundContract {
         // Update payment refund usage for cap tracking
         Self::update_payment_refund_usage(&env, payment_id, amount);
 
-        (RefundRequested {
+        (RefundRequestedEvent {
             refund_id,
             payment_id,
-            merchant,
             customer: customer.clone(),
+            merchant: merchant.clone(),
             amount,
             token,
+            reason_code: refund.reason_code.clone(),
+            requested_at: refund.requested_at,
         })
         .publish(&env);
 
@@ -5806,10 +5988,13 @@ impl RefundContract {
             .set(&DataKey::Refund(refund_id), &refund);
         Self::add_to_status_index(env, RefundStatus::Approved, refund_id);
 
-        (RefundApproved {
+        (RefundApprovedEvent {
             refund_id,
             payment_id: refund.payment_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
             amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             approved_by,
             approved_at: env.ledger().timestamp(),
         })
@@ -7039,7 +7224,10 @@ impl RefundContract {
 
     // Issue #147: Customer refund history functions
 
-    /// Get paginated refund history for a customer, sorted newest-first
+    /// Get paginated refund history for a customer, sorted newest-first.
+    ///
+    /// The page size is capped at `MAX_QUERY_PAGE_SIZE` (Issue #87) so the
+    /// returned history can never exceed a single ledger entry.
     pub fn get_customer_refund_history(
         env: Env,
         customer: Address,
@@ -7053,15 +7241,15 @@ impl RefundContract {
             return results;
         }
 
-        // Calculate range for newest-first ordering
-        let end = core::cmp::min(total, offset.saturating_add(limit));
+        // Issue #87: never build a result set larger than a single page.
+        let page_size = Self::clamp_page_size(limit);
 
         // Iterate in reverse order (newest first)
         let mut collected = 0u64;
         let mut skipped = 0u64;
         let mut index = total;
 
-        while index > 0 && collected < limit {
+        while index > 0 && collected < page_size {
             index -= 1;
 
             if skipped < offset {
@@ -7621,6 +7809,8 @@ impl RefundContract {
         offset: u64,
     ) -> Vec<Refund> {
         let mut results: Vec<Refund> = Vec::new(env);
+        // Issue #87: never scan more than a single page worth of matches.
+        let limit = Self::clamp_page_size(limit);
         if limit == 0 {
             return results;
         }
@@ -8111,8 +8301,12 @@ impl RefundContract {
         Self::add_to_status_index(&env, RefundStatus::Rejected, refund_id);
         Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by: env.current_contract_address(),
             rejected_at: env.ledger().timestamp(),
             rejection_reason: soroban_sdk::String::from_str(&env, "TTL expired"),
@@ -8570,22 +8764,36 @@ impl RefundContract {
             .get(&VoucherKey::Voucher(voucher_id))
     }
 
-    /// Get all refund vouchers issued to a customer.
+    /// Get a page of refund vouchers issued to a customer.
+    ///
+    /// Vouchers are stored individually under `VoucherKey::Voucher(voucher_id)`
+    /// and indexed per customer, so the query is paginated and the page size is
+    /// capped at `MAX_QUERY_PAGE_SIZE` (Issue #87).
     ///
     /// # Arguments
     /// * `customer` - The customer address to query.
+    /// * `limit` - Maximum number of vouchers to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of `RefundVoucher` entries for the customer.
-    pub fn get_customer_vouchers(env: Env, customer: Address) -> Vec<RefundVoucher> {
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&VoucherKey::CustomerVoucherCount(customer.clone()))
-            .unwrap_or(0);
+    /// A vector of at most `limit` `RefundVoucher` entries for the customer.
+    /// Empty when `limit` is `0` or `offset` is out of range.
+    pub fn get_customer_vouchers(
+        env: Env,
+        customer: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<RefundVoucher> {
+        let count = Self::get_customer_voucher_count(env.clone(), customer.clone());
         let mut results = Vec::new(&env);
-        let mut i = 0u64;
-        while i < count {
+        if limit == 0 || offset >= count {
+            return results;
+        }
+
+        let end = core::cmp::min(count, offset.saturating_add(Self::clamp_page_size(limit)));
+        let mut i = offset;
+        while i < end {
             if let Some(vid) = env
                 .storage()
                 .instance()
@@ -8602,6 +8810,16 @@ impl RefundContract {
             i += 1;
         }
         results
+    }
+
+    /// Number of refund vouchers issued to a customer.
+    ///
+    /// Use this with [`Self::get_customer_vouchers`] to page through the full list.
+    pub fn get_customer_voucher_count(env: Env, customer: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&VoucherKey::CustomerVoucherCount(customer))
+            .unwrap_or(0)
     }
 
     // ── Issue #194: Tiered arbitration escalation ─────────────────────────
@@ -9098,7 +9316,16 @@ mod test_voucher_expiry;
 mod schema_version_test;
 
 #[cfg(test)]
+mod test_schema_migration;
+
+#[cfg(test)]
+mod test_paginated_queries;
+
+#[cfg(test)]
 mod test_merchant_override_and_error_codes;
 
 #[cfg(test)]
 mod test_admin_rotation;
+
+#[cfg(test)]
+mod test_refund_events;

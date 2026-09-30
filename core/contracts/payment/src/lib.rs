@@ -119,60 +119,63 @@ pub enum DataKey {
 #[repr(u32)]
 #[contracterror]
 pub enum BasicError {
-    /// Caller is not authorized to invoke this entry point. Resolution: invoke with required admin/signer signature.
+    /// Admin authentication required. The caller is not a registered admin.
     Unauthorized = 100,
-    /// Provided metadata exceeds the maximum permitted byte length. Resolution: reduce metadata size under threshold.
+    /// Payment metadata exceeds the maximum allowed size.
     MetadataTooLarge = 101,
-    /// Transaction notes exceed allowed string length. Resolution: shorten notes content.
+    /// Payment notes exceed the maximum allowed size.
     NotesTooLarge = 102,
-    /// Specified currency is invalid or unsupported. Resolution: use supported currency (USDC, XLM, EURC).
+    /// Unsupported currency specified. Use XLM, USDC, USDT, BTC, or ETH.
     InvalidCurrency = 103,
-    /// Batch array size is zero or exceeds maximum batch limit. Resolution: submit batches between 1 and max limit.
+    /// Batch size is invalid. Use a batch size between 1 and 100.
     InvalidBatchSize = 104,
-    /// One or more items in the batch failed processing. Resolution: inspect individual item statuses and retry failed items.
+    /// Some payments in the batch failed. Check individual payment statuses.
     BatchPartialFailure = 105,
-    /// Rate limit reached for caller within the current window. Resolution: wait until the rate limit window resets.
+    /// Rate limit exceeded for this address. Wait for the rate limit window to reset.
     RateLimitExceeded = 106,
-    /// Transaction would exceed daily aggregate volume limit. Resolution: request limit increase or wait for the next day.
+    /// Daily volume limit exceeded. Wait for the next day or contact admin.
     DailyVolumeExceeded = 107,
-    /// Target address is flagged on the compliance/sanctions list. Resolution: unflag address via admin compliance review.
+    /// Address has been flagged for suspicious activity. Contact support to resolve.
     AddressFlagged = 108,
-    /// Address is already on the flagged list. Resolution: no-op; address is already flagged.
+    /// Address is already flagged. No action needed.
     AddressAlreadyFlagged = 109,
-    /// Payment amount exceeds per-transaction ceiling. Resolution: lower payment amount or request ceiling adjustment.
+    /// Payment amount exceeds the maximum allowed. Reduce payment amount.
     AmountExceedsLimit = 110,
-    /// Multi-signature configuration has not been initialized. Resolution: call initialize() before administrative actions.
+    /// Multi-signature not initialized. Initialize multi-sig configuration first.
     MultiSigNotInitialized = 111,
-    /// Admin count is below the minimum required signatures threshold. Resolution: add additional admins.
+    /// Not enough admin signatures. Collect the required number of admin signatures.
     InsufficientAdmins = 112,
-    /// Caller is not a registered admin in MultiSigConfig. Resolution: invoke using an authorized multi-sig admin address.
+    /// Caller is not an admin. Use an admin account.
     NotAnAdmin = 113,
-    /// Admin has already approved this proposal. Resolution: wait for remaining admins to submit approvals.
+    /// Admin has already approved this proposal. No action needed.
     AlreadyApproved = 114,
-    /// External price oracle invocation failed or panicked. Resolution: verify oracle contract availability and interface.
+    /// Price oracle call failed. Retry or check oracle configuration.
     OracleCallFailed = 115,
-    /// Contract is currently paused by an administrator. Resolution: resume contract via unpause_contract().
+    /// Contract is paused. Wait for the contract to be unpaused.
     ContractPaused = 116,
-    /// The specific contract function invoked is paused. Resolution: resume function via unpause_function().
+    /// This function is paused. Use an alternative function.
     FunctionPaused = 117,
-    /// Configured volume thresholds for fee tiers are non-monotonic. Resolution: ensure Tier 1 < Tier 2 < Tier 3 thresholds.
+    /// Tier threshold configuration is invalid. Fix tier threshold values.
     InvalidTierThresholds = 118,
-    /// Oracle price feed timestamp is older than maximum permitted latency. Resolution: update oracle price feed before retry.
+    /// Oracle price feed is stale. Wait for the next oracle update.
     OracleFeedStale = 119,
-    /// No price oracle address configured for this currency pair. Resolution: configure oracle via set_oracle_config().
+    /// Oracle is not configured. Configure the oracle first.
     OracleNotConfigured = 120,
-    /// Payment or sweep amount must be strictly positive. Resolution: supply an amount greater than zero.
+    /// Payment amount is invalid. Use a positive amount.
     InvalidAmount = 121,
-    /// Customer verification level record not found in storage. Resolution: register customer verification level first.
+    /// Verification level not found. Use a valid verification level.
     VerificationLevelNotFound = 122,
-    /// Limits for the customer's fee tier are unconfigured. Resolution: configure tier limits before processing.
+    /// Tier limits are not configured. Configure tier limits first.
     TierLimitsNotConfigured = 123,
-    /// Rolling window interval must be positive and within valid range. Resolution: supply positive interval in seconds.
+    /// Invalid interval specified. Use a valid interval.
     InvalidInterval = 124,
-    /// Fee or share basis points exceed 10,000 (100%). Resolution: supply basis points between 0 and 10,000.
+    /// Invalid basis points value. Use bps between 0 and 10000.
     InvalidBps = 125,
-    /// Contract storage schema is already at or above the target migration version. Resolution: specify newer version.
+    /// Schema is already at the target version. No migration needed.
     SchemaAlreadyAtTarget = 126,
+    // Issue #88: a data migration step failed, so the schema version must
+    // not be bumped (the whole transaction is reverted).
+    SchemaMigrationFailed = 127,
 }
 
 /// Errors relating to payment lifecycle, settlement, and scheduling.
@@ -180,55 +183,55 @@ pub enum BasicError {
 #[repr(u32)]
 #[contracterror]
 pub enum PaymentError {
-    /// Payment ID was not found in storage. Resolution: verify payment ID before invoking operations.
+    /// Payment not found. Verify the payment ID.
     NotFound = 200,
-    /// Payment is in an invalid status for the requested transition. Resolution: ensure payment is in expected status (Pending, etc.).
+    /// Payment is not in a valid status for this operation.
     InvalidStatus = 201,
-    /// Payment has already been finalized or refunded. Resolution: no-op; payment is already settled.
+    /// Payment has already been processed. No action needed.
     AlreadyProcessed = 202,
-    /// Payment timestamp has passed its expiration deadline. Resolution: create a new payment request.
+    /// Payment has expired. Create a new payment.
     Expired = 203,
-    /// Payment has not reached its expiration deadline yet. Resolution: wait until expires_at timestamp has elapsed.
+    /// Payment has not expired yet. Wait for expiration.
     NotExpired = 204,
-    /// Payment was created without an expiration deadline. Resolution: specify non-zero expires_at if expiry logic is needed.
+    /// Payment has no expiration set.
     NoExpiration = 205,
-    /// Underlying token transfer invocation failed. Resolution: check token balance and allowance authorizations.
+    /// Token transfer failed. Check token balance and allowances.
     TransferFailed = 206,
-    /// Refund amount exceeds original payment total. Resolution: specify a refund amount less than or equal to payment amount.
+    /// Refund amount exceeds the original payment amount.
     RefundExceedsPayment = 207,
-    /// Scheduled payment execution attempted before due date. Resolution: wait until scheduled execution timestamp is reached.
+    /// Payment is not yet due. Wait for the scheduled time.
     NotYetDue = 208,
-    /// Scheduled payment has been cancelled by the payer. Resolution: recreate schedule if payment should proceed.
+    /// Scheduled payment has been cancelled.
     ScheduledPaymentCancelled = 209,
-    /// Metadata hash or URI was already registered for this payment. Resolution: metadata is immutable once set.
+    /// Metadata has already been set for this payment.
     MetadataAlreadySet = 210,
-    /// Requested metadata key or record not found. Resolution: attach metadata via attach_metadata() before reading.
+    /// Metadata not found for this payment.
     MetadataNotFound = 211,
-    /// Computed metadata hash does not match provided expected hash. Resolution: verify metadata content integrity.
+    /// Hash mismatch. The provided hash does not match the stored hash.
     HashMismatch = 212,
-    /// Installment payment cannot be made on fully settled balance. Resolution: no-op; balance is zero.
+    /// Payment has already been fully paid.
     AlreadyFullyPaid = 213,
-    /// Installment amount exceeds outstanding unpaid balance. Resolution: reduce installment amount to remaining balance.
+    /// Installment amount exceeds the remaining balance.
     InstallmentExceedsRemaining = 214,
-    /// Partial payment record for this payment ID not found. Resolution: verify partial payment plan initialization.
+    /// Partial payment not found. Verify the partial payment ID.
     PartialPaymentNotFound = 215,
-    /// Merchant transaction velocity limit exceeded. Resolution: wait for merchant velocity window to reset.
+    /// Merchant rate limit exceeded. Wait for the rate limit window to reset.
     MerchantRateLimitExceeded = 216,
-    /// Merchant volume limit exceeded for current period. Resolution: wait for volume window reset or upgrade tier.
+    /// Amount rate limit exceeded. Reduce the payment amount.
     AmountRateLimitExceeded = 217,
-    /// Payout schedule configuration record not found. Resolution: configure payout schedule before execution.
+    /// Payout schedule not found. Configure a payout schedule first.
     PayoutScheduleNotFound = 218,
-    /// Milestone or scheduled payout timestamp is in the future. Resolution: wait until payout due date arrives.
+    /// Payout is not yet due. Wait for the scheduled time.
     PayoutNotYetDue = 219,
-    /// No accumulated balance available for settlement. Resolution: ensure transactions have generated settleable volume.
+    /// Nothing to settle. The payment has no outstanding balance.
     NothingToSettle = 220,
-    /// Arithmetic overflow occurred during billing calculation. Resolution: check item price and quantity inputs.
+    /// Billing overflow. The billing amount exceeds the maximum allowed.
     BillingOverflow = 221,
-    /// Line item description or quantity is invalid. Resolution: provide positive unit price and valid quantity.
+    /// Invalid line item. Check the line item data.
     InvalidLineItem = 222,
-    /// Scheduled execution timestamp is in the past or exceeds maximum horizon. Resolution: provide future schedule timestamp.
+    /// Invalid scheduled time. Use a future timestamp.
     InvalidScheduleTime = 223,
-    /// Specified token is not on the contract's allowed asset list. Resolution: register token via admin add_allowed_token().
+    /// Token not allowed. Use an allowed token.
     TokenNotAllowed = 224,
 }
 
@@ -303,89 +306,89 @@ pub enum ProposalError {
 #[repr(u32)]
 #[contracterror]
 pub enum FeatureError {
-    /// Associated escrow contract mapping not found. Resolution: set escrow contract address via set_escrow_contract().
+    /// Escrow mapping not found. Create the escrow mapping first.
     EscrowMappingNotFound = 500,
-    /// Cross-contract invocation to EscrowContract failed. Resolution: check escrow contract state and permissions.
+    /// Escrow bridge operation failed. Retry or check bridge configuration.
     EscrowBridgeFailed = 501,
-    /// Platform fee configuration is missing. Resolution: initialize fee config via set_fee_config().
+    /// Fee configuration not found. Configure fees first.
     FeeConfigNotFound = 502,
-    /// Accumulated protocol fees are insufficient for the requested sweep. Resolution: verify sweepable balance before sweeping.
+    /// Insufficient fees accumulated. Wait for more fees to accumulate.
     InsufficientFees = 503,
-    /// Condition predicate evaluated to false. Resolution: ensure condition prerequisite is met.
+    /// Condition not met. Fulfill the required condition.
     ConditionNotMet = 504,
-    /// Conditional escrow rule has already been evaluated. Resolution: cannot re-evaluate finalized condition.
+    /// Condition has already been evaluated. No action needed.
     ConditionAlreadyEvaluated = 505,
-    /// Automatic escrow triggering rule not found. Resolution: register auto-escrow rule before processing payment.
+    /// Auto-escrow rule not found. Configure the rule first.
     AutoEscrowRuleNotFound = 506,
-    /// Payment amount is below the auto-escrow trigger threshold. Resolution: payment processed directly without escrow.
+    /// Auto-escrow amount is below the minimum threshold.
     AutoEscrowBelowMinimum = 507,
-    /// Auto-escrow rule has already been triggered for this payment. Resolution: no-op; escrow already initiated.
+    /// Auto-escrow has already been triggered. No action needed.
     AutoEscrowAlreadyTriggered = 508,
-    /// Oracle runtime failure during condition evaluation. Resolution: check oracle feed connectivity.
+    /// Condition evaluation failed. Check the condition configuration.
     ConditionEvaluationFailed = 509,
-    /// Runtime condition parameter check failed. Resolution: verify condition parameters match required criteria.
+    /// Condition not met at runtime. Check the condition logic.
     ConditionRuntimeNotMet = 510,
-    /// Fee basis points exceed maximum allowed bps (10,000). Resolution: configure valid fee basis points.
+    /// Invalid fee configuration. Fix the fee config values.
     InvalidFeeConfig = 511,
-    /// Payment channel ID not found in storage. Resolution: verify channel ID or open channel before settling.
+    /// Payment channel not found. Verify the channel ID.
     ChannelNotFound = 512,
-    /// Cryptographic signature verification failed on payment channel update. Resolution: provide valid Ed25519 signature.
+    /// Invalid signature. The signature does not match the expected value.
     InvalidSignature = 513,
-    /// Channel sequence number is not strictly greater than current settled nonce. Resolution: increment off-chain nonce.
+    /// Invalid nonce. Use a nonce greater than the current sequence.
     InvalidNonce = 514,
-    /// Payment channel is already closed and cannot be settled again. Resolution: open a new channel if needed.
+    /// Payment channel is closed. Open a new channel.
     ChannelClosed = 515,
-    /// Payment channel has expired and can only be closed for customer refund. Resolution: close expired channel.
+    /// Payment channel has expired. Open a new channel.
     ChannelExpired = 516,
-    /// Attempted close_channel_expired on an active channel before its expiry. Resolution: wait until expires_at passes.
+    /// Payment channel has not expired yet. Wait for expiration.
     ChannelNotExpired = 517,
-    /// Split payment percentage shares do not sum to 10,000 bps (100%). Resolution: ensure split shares sum exactly to 10,000.
+    /// Invalid split shares. The shares do not sum to 100%.
     InvalidSplitShares = 518,
-    /// Number of split recipients exceeds maximum supported recipient count. Resolution: reduce recipient list.
+    /// Too many recipients. Reduce the number of recipients.
     TooManyRecipients = 519,
-    /// Counterparty address is invalid or identical to the sender. Resolution: provide valid distinct counterparty address.
+    /// Invalid counterparty. Use a valid counterparty address.
     InvalidCounterparty = 540,
-    /// Split payout configuration for payment not found. Resolution: configure split rule before executing payment.
+    /// Split configuration not found. Configure splitting first.
     SplitConfigNotFound = 520,
-    /// Split payout has already been executed for this payment. Resolution: no-op; split payout already executed.
+    /// Split has already been executed. No action needed.
     SplitAlreadyExecuted = 521,
-    /// Customer loyalty program is not configured. Resolution: configure loyalty parameters via set_loyalty_config().
+    /// Loyalty program not configured. Configure loyalty first.
     LoyaltyNotConfigured = 522,
-    /// Customer has insufficient loyalty points for requested redemption. Resolution: earn additional loyalty points.
+    /// Insufficient loyalty points. Earn more points first.
     InsufficientPoints = 523,
-    /// Loyalty points have expired past their validity duration. Resolution: redeem points before validity period ends.
+    /// Loyalty points have expired. Earn new points.
     PointsExpired = 524,
-    /// No accumulated platform fees are available to sweep. Resolution: wait until fees accumulate from transactions.
+    /// No fees to sweep. Accumulate fees first.
     NothingToSweep = 525,
-    /// Sweep recipient address has not been configured by admin. Resolution: configure recipient via set_sweep_recipient().
+    /// Sweep recipient not set. Set the sweep recipient first.
     SweepRecipientNotSet = 526,
-    /// Customer transaction exceeds rolling spend limit. Resolution: wait for spend limit rolling window to reset.
+    /// Spend limit exceeded. Reduce the payment amount or increase the limit.
     SpendLimitExceeded = 527,
-    /// Spend limit has not been configured for this customer. Resolution: configure limit via set_customer_spend_limit().
+    /// Spend limit not configured. Configure spend limits first.
     SpendLimitNotConfigured = 528,
-    /// Settlement finality period has not elapsed. Resolution: wait until required ledger finality blocks have passed.
+    /// Settlement not ready. Wait for settlement conditions to be met.
     SettlementNotReady = 529,
-    /// Finality configuration not set. Resolution: initialize finality settings via set_finality_config().
+    /// Finality configuration not found. Configure finality first.
     FinalityConfigNotFound = 530,
-    /// Settlement for this payment has already reached finality. Resolution: no-op; payment is finalized.
+    /// Settlement has already been finalized. No action needed.
     SettlementAlreadyFinalized = 531,
-    /// Customer volume is below the volume threshold for a fee rebate. Resolution: achieve qualifying volume before claiming.
+    /// Rebate threshold not met. Increase the payment amount.
     RebateThresholdNotMet = 532,
-    /// Fee rebate for this period has already been claimed. Resolution: wait until next rebate qualification cycle.
+    /// Rebate has already been claimed. No action needed.
     RebateAlreadyClaimed = 533,
-    /// Fee rebate program configuration not found. Resolution: initialize rebate config via set_rebate_config().
+    /// Rebate configuration not found. Configure rebates first.
     RebateConfigNotFound = 534,
-    /// Payment forwarding route not found for recipient. Resolution: set up forwarding route via set_forward_config().
+    /// Forward configuration not found. Configure forwarding first.
     ForwardConfigNotFound = 535,
-    /// Forwarding configuration creates a circular loop. Resolution: remove cyclic forwarding address references.
+    /// Forward loop detected. Check the forwarding configuration.
     ForwardLoop = 536,
-    /// Forwarding fee basis points exceed 10,000. Resolution: supply valid forward bps between 0 and 10,000.
+    /// Invalid forward basis points. Use bps between 0 and 10000.
     InvalidForwardBps = 537,
-    /// Payment sender and recipient addresses are identical. Resolution: specify distinct recipient address.
+    /// Sender is the recipient. Use a different recipient.
     SenderIsRecipient = 538,
-    /// Split payment total is below minimum split amount threshold. Resolution: submit payment at or above minimum split amount.
+    /// Amount is below the minimum split amount. Increase the amount.
     BelowMinSplitAmount = 539,
-    /// Claimed settlement amounts do not sum to the original channel deposit. Resolution: ensure merchant + customer refund = deposit.
+    /// Balance sum mismatch. The settlement amounts do not sum to the deposit.
     BalanceSumMismatch = 541,
 }
 
@@ -444,7 +447,7 @@ impl TryFrom<soroban_sdk::Error> for Error {
             if code >= 200 && code <= 224 {
                 return Ok(Error::Payment(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 100 && code <= 126 {
+            if code >= 100 && code <= 127 {
                 return Ok(Error::Basic(unsafe { core::mem::transmute(code) }));
             }
         }
@@ -1951,6 +1954,33 @@ const PREMIUM_VOLUME_THRESHOLD: i128 = 10_000;
 const ENTERPRISE_VOLUME_THRESHOLD: i128 = 100_000;
 const INITIAL_SCHEMA_VERSION: u32 = 1;
 
+// Gas estimation constants used by the dry-run migration helper (Issue #89).
+// These model the dominant cost drivers of a schema migration: a fixed base
+// cost for opening the migration plus a per-record cost for converting each
+// stored record to the new schema layout.
+const MIGRATION_BASE_GAS: u64 = 50_000;
+const MIGRATION_GAS_PER_RECORD: u64 = 1_500;
+
+/// Read-only impact report produced by [`PaymentContract::dry_run_migrate_schema`].
+///
+/// The report lets admins estimate the cost and blast radius of a schema
+/// migration on mainnet or testnet without committing irreversible storage
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MigrationReport {
+    /// Schema version recorded before the migration.
+    pub current_version: u32,
+    /// Schema version the migration would move storage to.
+    pub target_version: u32,
+    /// Number of stored records that would be converted by the migration.
+    pub converted_records: u64,
+    /// Estimated gas, in instructions, the migration would consume.
+    pub gas_estimate: u64,
+    /// Always `true` for dry-run reports, distinguishing them from real runs.
+    pub dry_run: bool,
+}
+
 #[contractimpl]
 impl PaymentContract {
     /// Initializes the payment contract with a single admin and default multisig config.
@@ -1961,6 +1991,7 @@ impl PaymentContract {
     /// # Panics
     /// Panics if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env
             .storage()
             .instance()
@@ -2001,13 +2032,21 @@ impl PaymentContract {
 
     /// Migrates the contract storage schema to a target version.
     ///
+    /// Every data transformation registered for the versions between the
+    /// current schema version and `target_version` is executed **before**
+    /// `target_version` is written to storage. If a single entry cannot be
+    /// migrated the call returns `Error::Basic(BasicError::SchemaMigrationFailed)`
+    /// and the whole transaction is reverted, so the stored version can never
+    /// be bumped on top of partially migrated (or corrupted) state.
+    ///
     /// # Arguments
     /// * `admin` - The admin authorizing the migration (must be in the multisig admin list)
     /// * `target_version` - The schema version to migrate to
     ///
     /// # Returns
     /// `Ok(())` on success, or an error if the caller is not an admin, the target version
-    /// is not greater than the current version, or multisig is not initialized.
+    /// is not greater than the current version, multisig is not initialized, or a data
+    /// migration step failed.
     pub fn migrate_schema(env: Env, admin: Address, target_version: u32) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
@@ -2024,10 +2063,55 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::SchemaAlreadyAtTarget));
         }
 
+        // Issue #88: run every data migration first. `target_version` is only
+        // persisted once all transformations have completed successfully.
+        Self::run_data_migrations(&env, current, target_version)?;
+
         env.storage()
             .instance()
             .set(&DataKey::Config(ConfigKey::SchemaVersion), &target_version);
         Ok(())
+    }
+
+    /// Simulates a schema migration and returns an impact report without
+    /// modifying any storage (Issue #89).
+    ///
+    /// The report includes the number of records that would be converted and a
+    /// gas estimate for the migration, letting admins rehearse the migration
+    /// against a live deployment before executing it for real.
+    ///
+    /// This function is read-only: calling it repeatedly with the same target
+    /// version returns an identical report and never advances the schema
+    /// version.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `target_version` - The schema version the migration would move storage to.
+    ///
+    /// # Returns
+    /// A `MigrationReport` describing the migration impact.
+    pub fn dry_run_migrate_schema(env: Env, target_version: u32) -> MigrationReport {
+        let current_version = Self::get_schema_version(env.clone());
+        let payment_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::Counter))
+            .unwrap_or(0);
+        let subscription_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Subscription(SubscriptionKey::Counter))
+            .unwrap_or(0);
+        let converted_records = payment_count.saturating_add(subscription_count);
+        let gas_estimate = MIGRATION_BASE_GAS
+            .saturating_add(MIGRATION_GAS_PER_RECORD.saturating_mul(converted_records));
+        MigrationReport {
+            current_version,
+            target_version,
+            converted_records,
+            gas_estimate,
+            dry_run: true,
+        }
     }
 
     /// Sets the verification level for a specific merchant.
@@ -2821,9 +2905,10 @@ impl PaymentContract {
         if schedule.accumulated == 0 {
             return Err(Error::Payment(PaymentError::NothingToSettle));
         }
-        let token_client = token::Client::new(&env, &schedule.token);
-        let contract_address = env.current_contract_address();
-        token_client.transfer(&contract_address, &merchant, &schedule.accumulated);
+
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Update internal accounting balances and payout schedule before external token transfer
+        let payout_amount = schedule.accumulated;
         schedule.accumulated = 0;
         let period = match schedule.frequency {
             PayoutFrequency::Immediate => SECONDS_PER_DAY,
@@ -2833,9 +2918,14 @@ impl PaymentContract {
         };
         schedule.next_payout_at = schedule.next_payout_at + period;
         env.storage().instance().set(
-            &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant)),
+            &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant.clone())),
             &schedule,
         );
+
+        // Interaction: External token transfer
+        let token_client = token::Client::new(&env, &schedule.token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer(&contract_address, &merchant, &payout_amount);
         Ok(())
     }
 
@@ -4071,6 +4161,18 @@ impl PaymentContract {
         let escrow_carveout = PaymentContract::get_auto_escrow_carveout(env, &payment);
         let merchant_amount = net_amount - escrow_carveout;
 
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Persist payment completion status and fee records before executing external token transfers
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+        PaymentContract::update_merchant_fee_record_post_completion(
+            env,
+            payment.merchant.clone(),
+            payment.amount,
+            fee_amount,
+        );
+
         // Pull merchant proceeds into the contract, then honor payout schedule.
         let token_client = token::Client::new(env, &payment.token);
         let contract_address = env.current_contract_address();
@@ -4130,16 +4232,6 @@ impl PaymentContract {
                 }
             }
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
-        PaymentContract::update_merchant_fee_record_post_completion(
-            env,
-            payment.merchant.clone(),
-            payment.amount,
-            fee_amount,
-        );
 
         // Update analytics
         let mut analytics: PaymentAnalytics = env
@@ -4651,14 +4743,23 @@ impl PaymentContract {
         Ok(())
     }
 
-    /// Returns the full installment payment history for a given payment.
+    /// Returns a paginated list of the full installment payment history for a
+    /// given payment.
     ///
     /// # Arguments
     /// * `payment_id` - The ID of the payment to retrieve installment history for
+    /// * `limit` - Maximum number of installments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
+    /// * `offset` - Number of installments to skip for pagination
     ///
     /// # Returns
-    /// A `Vec<PartialPaymentRecord>` of all installments made toward the payment.
-    pub fn get_installment_history(env: Env, payment_id: u64) -> Vec<PartialPaymentRecord> {
+    /// A `Vec<PartialPaymentRecord>` with at most `limit` installment records.
+    pub fn get_installment_history(
+        env: Env,
+        payment_id: u64,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<PartialPaymentRecord> {
         let installment_counter: u32 = env
             .storage()
             .instance()
@@ -4668,18 +4769,47 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut history = Vec::new(&env);
-        for i in 1..=installment_counter {
+        if limit == 0 {
+            return history;
+        }
+
+        let total: u64 = installment_counter as u64;
+        let mut collected = 0u64;
+        let mut skipped = 0u64;
+        let mut index = total;
+        // Newest-first, mirroring the other history queries.
+        while index > 0 && collected < Self::clamp_page_size(limit) {
+            index -= 1;
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
             if let Some(record) =
                 env.storage()
                     .instance()
                     .get(&DataKey::State(StateDataKey::PartialPaymentRecord(
-                        payment_id, i,
+                        payment_id,
+                        (index + 1) as u32,
                     )))
             {
                 history.push_back(record);
+                collected += 1;
             }
         }
         history
+    }
+
+    /// Returns the number of installments recorded for a payment.
+    ///
+    /// Use this with [`Self::get_installment_history`] to page through the full
+    /// list.
+    pub fn get_installment_count(env: Env, payment_id: u64) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::PartialPaymentCounter(
+                payment_id,
+            )))
+            .unwrap_or(0)
     }
 
     /// Returns the outstanding balance remaining on a payment.
@@ -4856,14 +4986,16 @@ impl PaymentContract {
             }
         }
 
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Mark status as Refunded and update storage before any outgoing installment transfers
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+
         // #557: return any installments the customer already paid toward this
         // still-Pending payment before it becomes Refunded. A payment with no
         // installment history transfers nothing.
         PaymentContract::return_collected_installments(env, &payment, payment_id);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
 
         // Update analytics
         let mut analytics: PaymentAnalytics = env
@@ -5130,9 +5262,15 @@ impl PaymentContract {
 
     /// Returns a paginated list of payments made by a customer.
     ///
+    /// Payment ids are stored individually under
+    /// `Customer(Payments(customer, index))`, and the page size is capped at
+    /// `MAX_QUERY_PAGE_SIZE` (Issue #87) so a customer with a long payment
+    /// history can never produce a result set larger than a single ledger entry.
+    ///
     /// # Arguments
     /// * `customer` - The customer address to query
-    /// * `limit` - Maximum number of payments to return
+    /// * `limit` - Maximum number of payments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
     /// * `offset` - The number of payments to skip (for pagination)
     ///
     /// # Returns
@@ -5152,8 +5290,11 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut payments = Vec::new(&env);
+        // Issue #87: never build a result set larger than a single page.
         let start = offset;
-        let end = (offset + limit).min(total_count);
+        let end = offset
+            .saturating_add(PaymentContract::clamp_page_size(limit))
+            .min(total_count);
 
         for i in start..end {
             if let Some(payment_id) =
@@ -5193,9 +5334,15 @@ impl PaymentContract {
 
     /// Returns a paginated list of payments received by a merchant.
     ///
+    /// Payment ids are stored individually under
+    /// `Merchant(Payments(merchant, index))`, and the page size is capped at
+    /// `MAX_QUERY_PAGE_SIZE` (Issue #87) so a merchant with a long payment
+    /// history can never produce a result set larger than a single ledger entry.
+    ///
     /// # Arguments
     /// * `merchant` - The merchant address to query
-    /// * `limit` - Maximum number of payments to return
+    /// * `limit` - Maximum number of payments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
     /// * `offset` - The number of payments to skip (for pagination)
     ///
     /// # Returns
@@ -5215,8 +5362,11 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut payments = Vec::new(&env);
+        // Issue #87: never build a result set larger than a single page.
         let start = offset;
-        let end = (offset + limit).min(total_count);
+        let end = offset
+            .saturating_add(PaymentContract::clamp_page_size(limit))
+            .min(total_count);
 
         for i in start..end {
             if let Some(payment_id) =
@@ -7003,14 +7153,15 @@ impl PaymentContract {
         };
 
         if refund_amount > 0 {
-            token_client.transfer(&contract_address, &payment.customer, &refund_amount);
-
-            // Clear the cached outstanding balance so a later query recomputes
-            // against the now-terminal payment instead of returning stale data.
+            // Issue #109: Checks-Effects-Interactions (CEI) pattern
+            // Effect: Clear cached outstanding balance before external transfer
             env.storage().instance().set(
                 &DataKey::Payment(PaymentKey::OutstandingBalance(payment_id)),
                 &payment.amount,
             );
+
+            // Interaction: External token transfer
+            token_client.transfer(&contract_address, &payment.customer, &refund_amount);
         }
 
         refund_amount
@@ -9876,8 +10027,11 @@ impl PaymentContract {
     /// # Returns
     /// `Ok(())` on success.
     ///
-    /// # Errors
-    /// Returns an error if the caller is not an authorized admin.
+    /// Alias for pause_contract to pause all operations.
+    pub fn pause(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        Self::pause_contract(env, admin, reason)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
@@ -11485,7 +11639,7 @@ impl PaymentContract {
         signature: BytesN<64>,
     ) -> Result<(), Error> {
         Self::require_not_paused(&env, "settle_channel")?;
-        
+
         let mut channel: PaymentChannel = env
             .storage()
             .instance()
@@ -11511,11 +11665,13 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::InvalidAmount));
         }
 
-        // Verify signature over (channel_id, merchant_amount, nonce)
+        // Issue #113: Verify signature over (channel_id, merchant_amount, nonce, contract_address)
+        // Including the contract address prevents cross-channel replay attacks.
         let mut msg = Bytes::new(&env);
         msg.append(&channel_id.to_xdr(&env));
         msg.append(&merchant_amount.to_xdr(&env));
         msg.append(&nonce.to_xdr(&env));
+        msg.append(&env.current_contract_address().to_xdr(&env));
 
         env.crypto()
             .ed25519_verify(&channel.customer_pk, &msg, &signature);
@@ -11808,7 +11964,10 @@ impl PaymentContract {
                 .unwrap_or_else(|| Vec::new(&env));
             page.push_back(payment_id);
             env.storage().instance().set(
-                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(merchant.clone(), page_num)),
+                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
+                    merchant.clone(),
+                    page_num,
+                )),
                 &page,
             );
         }
@@ -12025,10 +12184,9 @@ impl PaymentContract {
 
         // Mark payment as Completed to prevent subsequent complete_payment calls
         payment.status = PaymentStatus::Completed;
-        env.storage().instance().set(
-            &DataKey::Payment(PaymentKey::Data(payment_id)),
-            &payment,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
 
         Ok(())
     }
@@ -12126,7 +12284,20 @@ impl PaymentContract {
     /// # Errors
     /// Returns an error if the caller is not an admin, the sweep recipient
     /// is not set, the fee config is missing, or there are no fees to sweep.
-    pub fn sweep_platform_fees(env: Env, admin: Address) -> Result<i128, Error> {
+    /// Sweeps up to `sweep_amount` of accumulated platform fees to the configured recipient.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must be a multi-sig admin).
+    /// * `sweep_amount` - The amount of accumulated fees to sweep.
+    ///
+    /// # Returns
+    /// The amount swept as `i128`.
+    ///
+    /// # Errors
+    /// Returns an error if the caller is not an admin, the sweep recipient
+    /// is not set, accumulated fees are empty, `sweep_amount` exceeds accumulated fees,
+    /// or multisig approval is required for amounts above threshold.
+    pub fn sweep_fees(env: Env, admin: Address, sweep_amount: i128) -> Result<i128, Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
             .storage()
@@ -12149,16 +12320,38 @@ impl PaymentContract {
         if accumulated <= 0 {
             return Err(Error::Feature(FeatureError::NothingToSweep));
         }
+
+        // Issue #111: Mathematical assertion — sweep amount must never exceed accumulated fees.
+        let sweep_amount: i128 = accumulated;
+        assert!(
+            sweep_amount <= accumulated,
+            "sweep_amount ({}) exceeds accumulated_fees ({})",
+            sweep_amount,
+            accumulated
+        );
+
+        // Issue #111: Require multisig approval for sweeps exceeding the threshold.
+        let sweep_threshold: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::LargePaymentThreshold))
+            .unwrap_or(0);
+        if sweep_threshold > 0 && sweep_amount > sweep_threshold {
+            if config.required_signatures > 1 {
+                return Err(Error::Basic(BasicError::InsufficientAdmins));
+            }
+        }
+
         let fee_config: FeeConfig = env
             .storage()
             .instance()
             .get(&DataKey::Config(ConfigKey::FeeConfig))
             .ok_or(Error::Feature(FeatureError::FeeConfigNotFound))?;
         let token_client = token::Client::new(&env, &fee_config.fee_token);
-        token_client.transfer(&env.current_contract_address(), &recipient, &accumulated);
+        token_client.transfer(&env.current_contract_address(), &recipient, &sweep_amount);
         env.storage()
             .instance()
-            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &0i128);
+            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &remaining);
         let sweep_id: u64 = env
             .storage()
             .instance()
@@ -12170,7 +12363,7 @@ impl PaymentContract {
             .set(&DataKey::Feature(FeatureKey::SweepCounter), &sweep_id);
         let record = FeeSweepRecord {
             sweep_id,
-            amount: accumulated,
+            amount: sweep_amount,
             token: fee_config.fee_token,
             recipient,
             swept_at: env.ledger().timestamp(),
@@ -12179,7 +12372,7 @@ impl PaymentContract {
             &DataKey::Feature(FeatureKey::SweepHistory(sweep_id)),
             &record,
         );
-        Ok(accumulated)
+        Ok(sweep_amount)
     }
 
     /// Returns the most recent fee sweep records, up to the specified limit.
@@ -12656,14 +12849,29 @@ impl PaymentContract {
         Ok(())
     }
 
-    /// Returns all pending (non-finalized) settlements for a merchant.
+    /// Returns a paginated list of pending (non-finalized) settlements for a merchant.
+    ///
+    /// Records are stored individually under
+    /// `Merchant(PendingSettlementIndex(merchant, index))` and read back in
+    /// pages, so a merchant with a long settlement backlog can never blow the
+    /// Soroban ledger entry limit of a single query result.
     ///
     /// # Arguments
     /// * `merchant` - The merchant address.
+    /// * `limit` - Maximum number of settlements to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of `PendingSettlement` records that have not yet been finalized.
-    pub fn get_pending_settlements(env: Env, merchant: Address) -> Vec<PendingSettlement> {
+    /// A vector of at most `limit` `PendingSettlement` records that have not
+    /// been finalized yet. An empty vector is returned when `limit` is `0` or
+    /// `offset` is beyond the end of the index.
+    pub fn get_pending_settlements(
+        env: Env,
+        merchant: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<PendingSettlement> {
         let count: u64 = env
             .storage()
             .instance()
@@ -12671,8 +12879,15 @@ impl PaymentContract {
                 merchant.clone(),
             )))
             .unwrap_or(0);
+
         let mut result = Vec::new(&env);
-        for i in 0..count {
+        if limit == 0 || offset >= count {
+            return result;
+        }
+
+        let end = core::cmp::min(count, offset.saturating_add(Self::clamp_page_size(limit)));
+        let mut i = offset;
+        while i < end {
             if let Some(payment_id) =
                 env.storage()
                     .instance()
@@ -12692,8 +12907,33 @@ impl PaymentContract {
                     }
                 }
             }
+            i += 1;
         }
         result
+    }
+
+    /// Returns the number of settlement index slots held by a merchant.
+    ///
+    /// Use this with [`Self::get_pending_settlements`] to page through the
+    /// full list.
+    pub fn get_pending_settlement_count(env: Env, merchant: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Merchant(MerchantDataKey::PendingSettlementCount(
+                merchant,
+            )))
+            .unwrap_or(0)
+    }
+
+    /// Maximum number of records a single paginated query may return (Issue #87).
+    ///
+    /// Requesting more than this is silently clamped so a caller can never ask
+    /// for a result set that would exceed Soroban's ledger entry size limit.
+    const MAX_QUERY_PAGE_SIZE: u64 = 100;
+
+    /// Clamps a caller supplied page size to `MAX_QUERY_PAGE_SIZE`.
+    fn clamp_page_size(limit: u64) -> u64 {
+        core::cmp::min(limit, Self::MAX_QUERY_PAGE_SIZE)
     }
 
     // ── Issue #127: Dunning automation aliases ────────────────────────────
@@ -13158,3 +13398,9 @@ mod test_scheduled_payment;
 
 #[cfg(test)]
 mod schema_version_test;
+
+#[cfg(test)]
+mod test_schema_migration;
+
+#[cfg(test)]
+mod test_paginated_queries;
