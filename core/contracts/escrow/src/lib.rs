@@ -3941,7 +3941,7 @@ impl EscrowContract {
             .unwrap_or(EscrowAnalytics::default_value());
         let old_released = analytics.total_escrows_released;
         analytics.total_escrows_released += 1;
-        analytics.total_value_released += escrow.amount;
+        analytics.total_value_released += distributable;
         analytics.avg_escrow_duration_seconds = if old_released == 0 {
             duration
         } else {
@@ -3958,7 +3958,7 @@ impl EscrowContract {
         // Update per-address analytics
         let merchant_addr = escrow.merchant.clone();
         let customer_addr = escrow.customer.clone();
-        let rel_amount = escrow.amount;
+        let rel_amount = distributable;
         EscrowContract::update_customer_analytics(&env, &customer_addr, |a| {
             a.total_escrows_released += 1;
             a.total_value_released += rel_amount;
@@ -3997,7 +3997,7 @@ impl EscrowContract {
         EscrowReleased {
             escrow_id,
             recipient,
-            amount: escrow.amount,
+            amount: distributable,
             token: escrow.token,
         }
         .publish(&env);
@@ -4058,13 +4058,13 @@ impl EscrowContract {
             &env,
             &escrow.token,
             &escrow.customer,
-            escrow.amount,
+            distributable,
         )?;
 
         EscrowResolved {
             escrow_id,
             released_to_merchant: false,
-            amount: escrow.amount,
+            amount: distributable,
         }
         .publish(&env);
 
@@ -4776,10 +4776,12 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
         EscrowContract::update_reputation_on_dispute_outcome(&env, &winner, &loser);
+        // Child sub-account milestone ledgers are isolated from the parent.
+        let distributable = Self::parent_liquidatable_amount(&env, &escrow);
         EscrowResolved {
             escrow_id,
             released_to_merchant: release_to_merchant,
-            amount: escrow.amount,
+            amount: distributable,
         }
         .publish(&env);
         Ok(())
@@ -4903,7 +4905,7 @@ impl EscrowContract {
                     &env,
                     &escrow.token,
                     &escrow.customer,
-                    escrow.amount,
+                    distributable,
                 )?;
             }
             AutoResolveFavor::Merchant => {
@@ -4911,7 +4913,7 @@ impl EscrowContract {
                     &env,
                     &escrow.token,
                     &escrow.merchant,
-                    escrow.amount,
+                    distributable,
                 )?;
             }
             AutoResolveFavor::SplitEqual => {
@@ -5156,7 +5158,7 @@ impl EscrowContract {
         EscrowResolved {
             escrow_id,
             released_to_merchant: release_to_merchant,
-            amount: escrow.amount,
+            amount: distributable,
         }
         .publish(&env);
 
@@ -7318,7 +7320,7 @@ impl EscrowContract {
                     .unwrap_or(EscrowAnalytics::default_value());
                 let old_released = analytics.total_escrows_released;
                 analytics.total_escrows_released += 1;
-                analytics.total_value_released += escrow.amount;
+                analytics.total_value_released += distributable;
                 analytics.avg_escrow_duration_seconds = if old_released == 0 {
                     duration
                 } else {
@@ -7333,11 +7335,11 @@ impl EscrowContract {
                     .set(&DataKey::Dispute(DisputeKey::EscrowAnalytics), &analytics);
                 EscrowContract::update_merchant_analytics(env, &escrow.merchant, |a| {
                     a.total_escrows_released += 1;
-                    a.total_value_released += escrow.amount;
+                    a.total_value_released += distributable;
                 });
                 EscrowContract::update_customer_analytics(env, &escrow.customer, |a| {
                     a.total_escrows_released += 1;
-                    a.total_value_released += escrow.amount;
+                    a.total_value_released += distributable;
                 });
 
                 // CEI: status, fee accumulator, reputation and analytics are
@@ -7368,7 +7370,7 @@ impl EscrowContract {
                 EscrowReleased {
                     escrow_id,
                     recipient: escrow.merchant.clone(),
-                    amount: escrow.amount,
+                    amount: distributable,
                     token: escrow.token,
                 }
                 .publish(env);
@@ -7443,7 +7445,7 @@ impl EscrowContract {
                 EscrowResolved {
                     escrow_id,
                     released_to_merchant: release_to_merchant,
-                    amount: escrow.amount,
+                    amount: distributable,
                 }
                 .publish(env);
             }
@@ -10426,13 +10428,13 @@ impl EscrowContract {
             &env,
             &escrow.token,
             &escrow.customer,
-            escrow.amount,
+            distributable,
         )?;
 
         EscrowExpired {
             escrow_id,
             refunded_to: escrow.customer.clone(),
-            amount: escrow.amount,
+            amount: distributable,
         }
         .publish(&env);
 
@@ -10959,6 +10961,45 @@ impl EscrowContract {
 
     fn effective_sub_account_fee_bps(sub: &EscrowSubAccount, parent_fee_bps: i128) -> i128 {
         sub.fee_bps_override.unwrap_or(parent_fee_bps)
+    }
+
+    /// Sum of every amount carved out into a child sub-account milestone
+    /// ledger, pending or already completed.
+    ///
+    /// Each milestone keeps its own `SubAccount(escrow_id, sub_id)` balance
+    /// entry; the parent escrow never owns those funds.
+    fn sub_account_allocated_total(env: &Env, escrow_id: u64) -> i128 {
+        let sub_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow(EscrowKey::SubAccountCounter(escrow_id)))
+            .unwrap_or(0);
+        let mut total: i128 = 0;
+        for sub_id in 1..=sub_count {
+            if let Some(sub) =
+                env.storage()
+                    .instance()
+                    .get::<DataKey, EscrowSubAccount>(&DataKey::Escrow(EscrowKey::SubAccount(
+                        escrow_id, sub_id,
+                    )))
+            {
+                total += sub.amount;
+            }
+        }
+        total
+    }
+
+    /// Amount of a parent escrow that a parent-level settlement may pay out.
+    ///
+    /// Completed child milestones have already left the contract and pending
+    /// ones stay reserved for their own `release_sub_account` call, so a
+    /// parent liquidation can only ever touch the escrow total minus every
+    /// sub-account allocation. This keeps child milestone ledgers isolated:
+    /// a parent liquidation can never drain or re-liquidate them.
+    fn parent_liquidatable_amount(env: &Env, escrow: &Escrow) -> i128 {
+        escrow
+            .amount
+            .saturating_sub(Self::sub_account_allocated_total(env, escrow.id))
     }
 
     /// Creates sub account.
