@@ -2873,9 +2873,10 @@ impl PaymentContract {
         if schedule.accumulated == 0 {
             return Err(Error::Payment(PaymentError::NothingToSettle));
         }
-        let token_client = token::Client::new(&env, &schedule.token);
-        let contract_address = env.current_contract_address();
-        token_client.transfer(&contract_address, &merchant, &schedule.accumulated);
+
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Update internal accounting balances and payout schedule before external token transfer
+        let payout_amount = schedule.accumulated;
         schedule.accumulated = 0;
         let period = match schedule.frequency {
             PayoutFrequency::Immediate => SECONDS_PER_DAY,
@@ -2885,9 +2886,14 @@ impl PaymentContract {
         };
         schedule.next_payout_at = schedule.next_payout_at + period;
         env.storage().instance().set(
-            &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant)),
+            &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant.clone())),
             &schedule,
         );
+
+        // Interaction: External token transfer
+        let token_client = token::Client::new(&env, &schedule.token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer(&contract_address, &merchant, &payout_amount);
         Ok(())
     }
 
@@ -4123,6 +4129,18 @@ impl PaymentContract {
         let escrow_carveout = PaymentContract::get_auto_escrow_carveout(env, &payment);
         let merchant_amount = net_amount - escrow_carveout;
 
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Persist payment completion status and fee records before executing external token transfers
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+        PaymentContract::update_merchant_fee_record_post_completion(
+            env,
+            payment.merchant.clone(),
+            payment.amount,
+            fee_amount,
+        );
+
         // Pull merchant proceeds into the contract, then honor payout schedule.
         let token_client = token::Client::new(env, &payment.token);
         let contract_address = env.current_contract_address();
@@ -4182,16 +4200,6 @@ impl PaymentContract {
                 }
             }
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
-        PaymentContract::update_merchant_fee_record_post_completion(
-            env,
-            payment.merchant.clone(),
-            payment.amount,
-            fee_amount,
-        );
 
         // Update analytics
         let mut analytics: PaymentAnalytics = env
@@ -4946,14 +4954,16 @@ impl PaymentContract {
             }
         }
 
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Mark status as Refunded and update storage before any outgoing installment transfers
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+
         // #557: return any installments the customer already paid toward this
         // still-Pending payment before it becomes Refunded. A payment with no
         // installment history transfers nothing.
         PaymentContract::return_collected_installments(env, &payment, payment_id);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
 
         // Update analytics
         let mut analytics: PaymentAnalytics = env
@@ -7111,14 +7121,15 @@ impl PaymentContract {
         };
 
         if refund_amount > 0 {
-            token_client.transfer(&contract_address, &payment.customer, &refund_amount);
-
-            // Clear the cached outstanding balance so a later query recomputes
-            // against the now-terminal payment instead of returning stale data.
+            // Issue #109: Checks-Effects-Interactions (CEI) pattern
+            // Effect: Clear cached outstanding balance before external transfer
             env.storage().instance().set(
                 &DataKey::Payment(PaymentKey::OutstandingBalance(payment_id)),
                 &payment.amount,
             );
+
+            // Interaction: External token transfer
+            token_client.transfer(&contract_address, &payment.customer, &refund_amount);
         }
 
         refund_amount
