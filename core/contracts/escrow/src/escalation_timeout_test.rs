@@ -4,7 +4,7 @@ use crate::*;
 use crate::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Env,
+    token, Address, Env, String,
 };
 
 fn setup(env: &Env) -> (EscrowContractClient, Address, Address, Address, Address) {
@@ -156,6 +156,71 @@ fn test_process_escalation_timeouts_skips_future_deadlines() {
 
     let processed = client.process_escalation_timeouts(&10_u32);
     assert_eq!(processed, 0);
+
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Disputed);
+}
+
+#[test]
+fn test_trigger_timeout_prefers_party_with_evidence() {
+    let env = Env::default();
+    let (client, admin, customer, merchant, token) = setup(&env);
+    // Configured default favors the customer; evidence should override it.
+    client.set_escalation_config(&admin, &300u64, &AutoResolveFavor::Customer);
+
+    let escrow_id = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
+
+    env.ledger().set_timestamp(1500);
+    client.submit_evidence(
+        &merchant,
+        &escrow_id,
+        &String::from_str(&env, "ipfs://merchant-evidence"),
+    );
+    client.escalate_dispute(&customer, &escrow_id);
+
+    let token_client = token::Client::new(&env, &token);
+    let merchant_before = token_client.balance(&merchant);
+
+    env.ledger().set_timestamp(1500 + 301);
+    client.trigger_timeout_resolution(&escrow_id);
+
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+    assert_eq!(
+        token_client.balance(&merchant) - merchant_before,
+        1000i128,
+        "the only party that filed evidence should win the timeout resolution"
+    );
+}
+
+#[test]
+fn test_trigger_timeout_requires_arbitration_when_both_submit_evidence() {
+    let env = Env::default();
+    let (client, admin, customer, merchant, token) = setup(&env);
+    client.set_escalation_config(&admin, &300u64, &AutoResolveFavor::Customer);
+
+    let escrow_id = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
+
+    env.ledger().set_timestamp(1500);
+    client.submit_evidence(
+        &customer,
+        &escrow_id,
+        &String::from_str(&env, "ipfs://customer-evidence"),
+    );
+    client.submit_evidence(
+        &merchant,
+        &escrow_id,
+        &String::from_str(&env, "ipfs://merchant-evidence"),
+    );
+    client.escalate_dispute(&customer, &escrow_id);
+
+    env.ledger().set_timestamp(1500 + 301);
+    let result = client.try_trigger_timeout_resolution(&escrow_id);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Action(ActionError::ArbitrationRequired))),
+        "contested evidence must not be auto-resolved without an arbitrator"
+    );
 
     let escrow = client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Disputed);
