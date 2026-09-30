@@ -38,6 +38,7 @@ pub enum ConfigKey {
     SchemaVersion,
     TrustedBridge(Address),
     EvidenceDeadlineConfig,
+    MinEscrowAmount,
 }
 
 #[derive(Clone)]
@@ -177,6 +178,7 @@ pub enum EscrowError {
     InvalidThreshold = 227,
     SuccessionPlanExists = 228,
     ClawbackDelayTooShort = 229,
+    DepositBelowMinimum = 230,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -248,7 +250,7 @@ impl TryFrom<soroban_sdk::Error> for Error {
             if code >= 300 && code <= 315 {
                 return Ok(Error::Action(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 200 && code <= 229 {
+            if code >= 200 && code <= 230 {
                 return Ok(Error::Escrow(unsafe { core::mem::transmute(code) }));
             }
             if code >= 100 && code <= 114 {
@@ -2699,6 +2701,8 @@ impl EscrowContract {
 
         let current_timestamp = env.ledger().timestamp();
 
+        Self::require_min_escrow_amount(&env, amount)?;
+
         // Validate expiry: if set (non-zero), must be strictly after release_timestamp
         if expiry_timestamp != 0 && expiry_timestamp <= release_timestamp {
             return Err(Error::Escrow(EscrowError::ExpiryBeforeRelease));
@@ -2879,6 +2883,8 @@ impl EscrowContract {
     ) -> Result<u64, Error> {
         customer.require_auth();
         Self::require_not_paused(&env, "create_multi_party_escrow")?;
+
+        Self::require_min_escrow_amount(&env, total_amount)?;
 
         // Minimum 2, maximum 10 participants
         if participants.len() < 2 || participants.len() > 10 {
@@ -10768,6 +10774,58 @@ impl EscrowContract {
             Some(config) => config,
             None => panic_with_error!(env, Error::Action(ActionError::StaleThresholdNotConfigured)),
         }
+    }
+
+    /// Sets the minimum escrow deposit amount enforced on escrow creation.
+    ///
+    /// # Arguments
+    /// * `env` - Soroban environment.
+    /// * `admin` - Address of the signer or participant.
+    /// * `min_amount` - Minimum deposit amount (must be positive).
+    ///
+    /// # Returns
+    /// Results in `Ok(())` on success or `Err(Error)` on failure.
+    ///
+    /// # Errors
+    /// Returns `Err(Error)` when the operation cannot be completed.
+    pub fn set_min_escrow_amount(
+        env: Env,
+        admin: Address,
+        min_amount: i128,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_not_paused(&env, "set_min_escrow_amount")?;
+        let multisig = Self::get_multisig_config(env.clone());
+        if !multisig.admins.contains(&admin) {
+            return Err(Error::Basic(BasicError::NotAnAdmin));
+        }
+        if min_amount < 0 {
+            return Err(Error::Escrow(EscrowError::DepositBelowMinimum));
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::MinEscrowAmount), &min_amount);
+        Ok(())
+    }
+
+    /// Returns the configured minimum escrow deposit amount (0 if unset).
+    pub fn get_min_escrow_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MinEscrowAmount))
+            .unwrap_or(0)
+    }
+
+    fn require_min_escrow_amount(env: &Env, amount: i128) -> Result<(), Error> {
+        let min_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MinEscrowAmount))
+            .unwrap_or(0);
+        if amount < min_amount {
+            return Err(Error::Escrow(EscrowError::DepositBelowMinimum));
+        }
+        Ok(())
     }
 
     /// Pure classification of an escrow's health given the current time and config.

@@ -379,6 +379,26 @@ fn test_create_escrow() {
 }
 
 #[test]
+#[should_panic(expected = "DepositBelowMinimum")]
+fn test_create_escrow_rejects_dust_deposit() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    // Configure a minimum escrow amount of 100.
+    client.set_min_escrow_amount(&Address::generate(&env), &100_i128);
+
+    // A 1-stroop deposit is below the minimum and must be rejected.
+    client.create_escrow(&customer, &merchant, &1_i128, &token, &1000_u64, &0_u64);
+}
+
+#[test]
 fn test_get_escrow() {
     let env = Env::default();
     let contract_id = env.register(EscrowContract, ());
