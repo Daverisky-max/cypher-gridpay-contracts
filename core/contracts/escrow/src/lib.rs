@@ -649,6 +649,15 @@ pub struct EvidenceDeadlineExceeded {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceDeadlineExtended {
+    pub escrow_id: u64,
+    pub previous_deadline: u64,
+    pub new_deadline: u64,
+    pub extended_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisputeEscalated {
     pub escrow_id: u64,
     pub level: u64,
@@ -4143,8 +4152,8 @@ impl EscrowContract {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
 
-        // Check evidence submission deadline
-        if let Some(deadline) = escrow.evidence_deadline {
+        // Check evidence submission deadline and apply grace period extension if submitted close to deadline
+        if let Some(mut deadline) = escrow.evidence_deadline {
             let current_time = env.ledger().timestamp();
             if current_time > deadline {
                 EvidenceDeadlineExceeded {
@@ -4154,6 +4163,28 @@ impl EscrowContract {
                 }
                 .publish(&env);
                 return Err(Error::Action(ActionError::EvidenceDeadlinePassed));
+            }
+
+            // Issue #108: Grace period front-running mitigation
+            // If evidence is submitted within 2 hours (7200s) of deadline, extend by 24 hours (86400s)
+            const GRACE_TRIGGER_WINDOW: u64 = 7200; // 2 hours
+            const GRACE_EXTENSION_DURATION: u64 = 86400; // 24 hours
+            if deadline.saturating_sub(current_time) <= GRACE_TRIGGER_WINDOW {
+                let previous_deadline = deadline;
+                deadline = deadline.saturating_add(GRACE_EXTENSION_DURATION);
+                let mut updated_escrow = escrow.clone();
+                updated_escrow.evidence_deadline = Some(deadline);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &updated_escrow);
+
+                EvidenceDeadlineExtended {
+                    escrow_id,
+                    previous_deadline,
+                    new_deadline: deadline,
+                    extended_at: current_time,
+                }
+                .publish(&env);
             }
         }
 
@@ -4470,8 +4501,8 @@ impl EscrowContract {
 
         let now = env.ledger().timestamp();
 
-        // Enforce the same evidence deadline as the single-item path.
-        if let Some(deadline) = escrow.evidence_deadline {
+        // Enforce evidence deadline and apply grace period extension if submitted close to deadline
+        if let Some(mut deadline) = escrow.evidence_deadline {
             if now > deadline {
                 EvidenceDeadlineExceeded {
                     escrow_id,
@@ -4480,6 +4511,27 @@ impl EscrowContract {
                 }
                 .publish(&env);
                 return Err(Error::Action(ActionError::EvidenceDeadlinePassed));
+            }
+
+            // Issue #108: Grace period front-running mitigation
+            const GRACE_TRIGGER_WINDOW: u64 = 7200; // 2 hours
+            const GRACE_EXTENSION_DURATION: u64 = 86400; // 24 hours
+            if deadline.saturating_sub(now) <= GRACE_TRIGGER_WINDOW {
+                let previous_deadline = deadline;
+                deadline = deadline.saturating_add(GRACE_EXTENSION_DURATION);
+                let mut updated_escrow = escrow.clone();
+                updated_escrow.evidence_deadline = Some(deadline);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &updated_escrow);
+
+                EvidenceDeadlineExtended {
+                    escrow_id,
+                    previous_deadline,
+                    new_deadline: deadline,
+                    extended_at: now,
+                }
+                .publish(&env);
             }
         }
         let page_num: u32 = env

@@ -132,7 +132,7 @@ fn execute_large_payment_respects_finality_delay() {
     // Funds are held, not settled instantly.
     let token_client = token::Client::new(&env, &token_addr);
     assert_eq!(token_client.balance(&merchant), 0);
-    let settlements = client.get_pending_settlements(&merchant);
+    let settlements = client.get_pending_settlements(&merchant, &10, &0);
     assert_eq!(settlements.len(), 1);
     assert_eq!(settlements.get(0).unwrap().payment_id, payment_id);
 }
@@ -198,7 +198,7 @@ fn batch_optimized_respects_finality_delay_and_accrues_loyalty() {
     assert!(results.get(1).unwrap().success);
 
     // The large payment is held as a pending settlement (finality delay honored).
-    let settlements = client.get_pending_settlements(&merchant);
+    let settlements = client.get_pending_settlements(&merchant, &10, &0);
     assert_eq!(settlements.len(), 1);
     assert_eq!(settlements.get(0).unwrap().amount, 5_940); // 6_000 - 1% fee
 
