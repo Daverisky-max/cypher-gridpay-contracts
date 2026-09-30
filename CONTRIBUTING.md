@@ -39,41 +39,38 @@ Before you begin, ensure you have:
    cargo test --workspace
    ```
 
-### 🐳 Local Stellar Quickstart Environment (Docker)
+### Local Development with Docker
 
-For local development and end-to-end integration testing against a standalone Stellar Soroban network, use the bundled `docker-compose.yml`:
+For a local Stellar test environment with standalone Soroban RPC, use the provided `docker-compose.yml`:
 
-1. **Start the local standalone container**:
-   ```bash
-   docker compose up -d
-   ```
-   This spins up `stellar/quickstart:testing` with local Horizon and Soroban RPC listening at `http://localhost:8000/soroban/rpc`.
+```bash
+# Start the local Stellar Quickstart network
+docker-compose up -d
 
-2. **Configure the local network in Stellar CLI**:
-   ```bash
-   stellar network add --global local \
-     --rpc-url "http://localhost:8000/soroban/rpc" \
-     --network-passphrase "Standalone Network ; February 2017"
-   ```
+# Check that the network is running
+curl -s http://localhost:8000/
 
-3. **Generate and fund a local development identity**:
-   ```bash
-   # Generate keypair
-   stellar keys generate --network local alice
+# Fund a test account using the friendbot/faucet
+curl "http://localhost:8000/friendbot?addr=<YOUR_ADDRESS>"
 
-   # Fund identity via local Friendbot
-   curl -s "http://localhost:8000/friendbot?addr=$(stellar keys address alice)"
-   ```
+# Deploy contracts using the deployment script
+./scripts/deploy-testnet.sh
+```
 
-4. **Verify local connection**:
-   ```bash
-   stellar keys balance alice --network local
-   ```
+The `docker-compose.yml` service uses `stellar/quickstart:testing` with Soroban RPC enabled, providing:
+- **Stellar Core** on port 8000 (standalone mode)
+- **Soroban RPC** on port 8001 for smart contract interaction
+- Automatic network passphrase: `Standalone Network ; February 2017`
 
-5. **Stop the local environment when done**:
-   ```bash
-   docker compose down
-   ```
+To stop the environment:
+```bash
+docker-compose down
+```
+
+To reset all data:
+```bash
+docker-compose down -v
+```
 
 ### Makefile Targets
 

@@ -36,87 +36,75 @@ Clawback follows a strict three-phase sequence:
 ### Error reference
 
 | Error | Cause |
-| --- | --- |
-| `BasicError::NotAnAdmin` | Caller is not in the multisig admin set |
-| `EscrowError::ClawbackDelayTooShort` | `delay_seconds < 86,400` |
-| `EscrowError::NotFound` | Target escrow does not exist |
-| `EscrowError::AlreadyProcessed` | A live clawback request already exists for this escrow (on initiate), or the request was already executed |
-| `EscrowError::InvalidStatus` | Request was already cancelled (on execute) |
-| `ActionError::NotReady` | Execution attempted before `execute_after` timestamp |
-| `BasicError::Unauthorized` | `request_id` not found in storage |
+|-------|-------|
+| `AlreadyProcessed` | A clawback request for this escrow is already active |
+| `NotReady` | The mandatory delay has not yet elapsed |
+| `Unauthorized` | Caller is not a registered admin |
 
-## Cross-Contract Call
+---
 
-An on-chain invocation where one Soroban contract synchronously calls another (e.g. Admin Orchestrator invoking `pause()` on Payment, Escrow, or Refund contracts, or payment calling external SEP-41 token contracts).
+## Core Protocol Terms
 
-## Dispute
+### Escrow
 
-A formal contest raised by a customer or merchant against an active payment or escrow, preventing automatic release until resolved by consensus or arbitrator ruling.
+A smart contract mechanism that holds tokens in escrow until predefined conditions are met. In Cypher GridPay, escrows are created when a customer initiates a payment and are released to the merchant upon completion or refunded to the customer if the payment is cancelled or disputed.
 
-## Escrow
+### Payment Channel
 
-A smart contract that locks funds between a customer and a merchant while a transaction is pending, disputed, or held. Escrows track status through a lifecycle of Locked, Released, Disputed, Resolved, and Cancelled.
+An off-chain mechanism for high-frequency micropayments between two parties. Balance updates are signed off-chain and only the final state is submitted on-chain. Each update includes a sequence number to prevent replay attacks.
 
-## Evidence Submission & Grace Period
+### Settlement
 
-The process where conflicting parties submit verifiable proofs during a dispute. Submitting evidence close to the deadline automatically triggers a grace period extension to prevent front-running attacks.
+The process of converting a locked payment into a final transfer to the merchant. Settlement occurs when the payment is completed by an admin, triggering the release of escrowed funds minus any applicable fees.
 
-## Fee Sweep
+### Multi-Sig (Multi-Signature)
 
-An administrative function enabling authorized platform operators to withdraw accumulated protocol fees without affecting locked customer funds or unfinalized escrow balances.
+A security mechanism requiring multiple authorized signatures before executing sensitive operations. The Cypher GridPay protocol uses configurable multi-sig thresholds for admin operations like fee sweeps, contract pause, and admin changes.
 
-## Finality Delay
+### Fee Sweep
 
-A payment-settlement feature that holds merchant funds for a configurable period after payment completion before releasing them. Payments below a configurable `min_amount_threshold` bypass the delay and settle immediately.
+The accumulated protocol fees (from payment processing) that can be withdrawn by authorized admins. Sweeps are strictly limited to the accumulated fee balance and cannot touch merchant escrowed or unfinalized funds.
 
-## Friendbot
+### Rate Limit
 
-Stellar's testnet faucet service providing automated initial XLM funding for newly generated keypairs and testing accounts.
+A sliding-window mechanism that restricts the number of payments a single address can create within a given time period. Rate limits prevent ledger spam and denial-of-service attacks.
 
-## Horizon
+### Circuit Breaker
 
-The Stellar network's HTTP API used by off-chain services to subscribe to ledger events (such as `EscrowCreated`), enabling real-time notifications without polling.
+An automatic halt mechanism that pauses contract operations when anomalous conditions are detected (e.g., excessive refund volume, oracle failure). Circuit breakers protect funds during potential attack scenarios.
 
-## Invariant (Economic Invariant)
+### Arbitration
 
-A mathematical truth that must hold across all states of the protocol: Total Locked Tokens == Sum(Active Escrows) + Sum(Pending Settlements) + Accumulated Fees.
+A dispute resolution process where a neutral third party (arbitrator) evaluates evidence from both sides and determines the outcome of a refund or escrow dispute. Arbitration requires staking and has time-bound deadlines.
 
-## Multisig
+### Vesting Schedule
 
-Multi-signature governance model used for admin operations across contracts. Actions require a configurable number of approvals from an admin set before they execute, following a proposal-based workflow.
+A time-based release mechanism for escrowed funds. Vesting schedules can be linear, cliff-based, or custom, and can be accelerated by authorized parties under specific conditions.
 
-## Payment Contract
+### Schema Version
 
-The core contract handling merchant checkout flows, one-off payments, subscription schedules, and protocol fee deductions.
+A numeric identifier stored in contract storage that tracks the current data layout version. Schema versioning enables safe data migrations when contract logic is upgraded.
 
-## Reason Code
+### Checks-Effects-Interactions
 
-A type-safe enum (`RefundReasonCode`) that categorises refunds into structured reasons: `ProductDefect`, `NonDelivery`, `DuplicateCharge`, `Unauthorized`, `CustomerRequest`, and `Other`.
+A security pattern where all state checks are performed first, then state changes are applied, and finally external calls are made. This pattern prevents reentrancy attacks.
 
-## Refund Contract
+### Reentrancy
 
-The core contract managing merchant and customer refund negotiations, appeal workflows, arbitrator rulings, and store credit issuance.
+An attack where a malicious contract calls back into the original contract before the first invocation completes, potentially manipulating state or draining funds. Prevented by following the Checks-Effects-Interactions pattern.
 
-## Soroban RPC
+### Front-Running
 
-The JSON-RPC service providing access to Soroban smart contract simulation, transaction submission, and ledger storage inspection.
+The practice of observing pending transactions in the mempool and submitting a competing transaction with higher gas to execute first. In Cypher GridPay, front-running mitigations include admin authorization requirements and deadline extensions for dispute evidence.
 
-## Spend Limits
+### Griefing
 
-Per-customer rolling spending caps enforced during payment creation. Each limit specifies a maximum amount within a configurable time window; the counter resets when the window elapses.
+An attack where an attacker causes inconvenience or financial loss to other users without direct benefit to themselves. Examples include submitting frivolous disputes or spamming the ledger.
 
-## Sub-Account
+### Oracle
 
-A labelled partition of an escrow that can be funded and released independently. A parent escrow cannot be fully released until all its sub-accounts have been released.
+An external data source that provides information to smart contracts, such as token price feeds. Cypher GridPay uses oracles for currency conversion and includes staleness checks to prevent manipulation.
 
-## Threshold
+### Deadline Extension
 
-A configurable minimum value used in multiple contexts: the number of multisig approvals required to execute a proposal, the cumulative weight (in basis points) needed to release a multi-party escrow, or an inactivity period before reputation decay begins.
-
-## TTL (Time-To-Live / State Archival)
-
-Soroban's storage management mechanism where ledger entries (instance, temporary, or persistent) expire unless periodically extended with rent payments.
-
-## WASM
-
-WebAssembly — the compiled bytecode format (`.wasm`) to which Soroban smart contracts are compiled for deployment on the Stellar network, using the `wasm32-unknown-unknown` Rust target.
+An automatic extension of dispute evidence submission deadlines when new evidence is submitted close to the deadline. This prevents front-running attacks on evidence submission.

@@ -1,178 +1,129 @@
-# Centralized Error Catalog
+# Error Codes Reference
 
-This document catalogs all `#[contracterror]` codes across the Cypher GridPay smart contract suite, covering Payment, Escrow, Refund, and Admin Orchestrator contracts.
+This document catalogs all contract error variants across the Cypher GridPay protocol contracts, providing a standard mapping of error integers to user-friendly messages.
 
----
+## Payment Contract
 
-## 🏛️ Admin Orchestrator Contract (`orchestrator/contracts/admin`)
+### BasicError
 
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `1` | `AlreadyInitialized` | Contract has already been initialized with component addresses. | Verify configuration; do not re-run initialization. |
-| `2` | `NotInitialized` | Contract has not yet been initialized. | Run `initialize` before executing admin operations. |
-| `3` | `Unauthorized` | Caller address does not match the configured admin or pauser. | Ensure transaction is signed by the authorized administrator identity. |
+| Code | Name | Message | Resolution |
+|------|------|---------|------------|
+| 100 | Unauthorized | Admin authentication required | Ensure the caller is a registered admin |
+| 101 | MetadataTooLarge | Payment metadata exceeds size limit | Reduce metadata size |
+| 102 | NotesTooLarge | Payment notes exceed size limit | Reduce notes size |
+| 103 | InvalidCurrency | Unsupported currency specified | Use a supported currency (XLM, USDC, USDT, BTC, ETH) |
+| 104 | InvalidBatchSize | Batch size is invalid | Use a batch size between 1 and 100 |
+| 105 | BatchPartialFailure | Some payments in batch failed | Check individual payment statuses |
+| 106 | RateLimitExceeded | Rate limit exceeded for this address | Wait for the rate limit window to reset |
+| 107 | DailyVolumeExceeded | Daily volume limit exceeded | Wait for the next day or contact admin |
+| 108 | AddressFlagged | Address has been flagged for suspicious activity | Contact support to resolve flag |
+| 109 | AddressAlreadyFlagged | Address is already flagged | No action needed |
+| 110 | AmountExceedsLimit | Payment amount exceeds maximum allowed | Reduce payment amount |
+| 111 | MultiSigNotInitialized | Multi-signature not initialized | Initialize multi-sig configuration first |
+| 112 | InsufficientAdmins | Not enough admin signatures required | Collect required number of admin signatures |
+| 113 | NotAnAdmin | Caller is not an admin | Use an admin account |
+| 114 | AlreadyApproved | Admin has already approved this proposal | No action needed |
+| 115 | OracleCallFailed | Price oracle call failed | Retry or check oracle configuration |
+| 116 | ContractPaused | Contract is paused | Wait for contract to be unpaused |
+| 117 | FunctionPaused | This function is paused | Use an alternative function |
+| 118 | InvalidTierThresholds | Tier threshold configuration is invalid | Fix tier threshold values |
+| 119 | OracleFeedStale | Oracle price feed is stale | Wait for next oracle update |
+| 120 | OracleNotConfigured | Oracle is not configured | Configure oracle first |
+| 121 | InvalidAmount | Payment amount is invalid | Use a positive amount |
+| 122 | VerificationLevelNotFound | Verification level not found | Use a valid verification level |
+| 123 | TierLimitsNotConfigured | Tier limits are not configured | Configure tier limits first |
+| 124 | InvalidInterval | Invalid interval specified | Use a valid interval |
+| 125 | InvalidBps | Invalid basis points value | Use bps between 0 and 10000 |
+| 126 | SchemaAlreadyAtTarget | Schema is already at target version | No migration needed |
 
----
+## Escrow Contract
 
-## 💳 Payment Contract (`core/contracts/payment`)
+### EscrowError
 
-### Basic & Access Errors (`100`–`199`)
+| Code | Name | Message | Resolution |
+|------|------|---------|------------|
+| 1 | EscrowNotFound | Escrow not found | Verify the escrow ID |
+| 2 | EscrowAlreadyExists | Escrow already exists | Use a unique escrow ID |
+| 3 | EscrowExpired | Escrow has expired | Create a new escrow |
+| 4 | EscrowNotExpired | Escrow has not expired yet | Wait for expiration |
+| 5 | Unauthorized | Not authorized to perform this action | Use an authorized account |
+| 6 | InvalidAmount | Invalid amount specified | Use a positive amount |
+| 7 | InvalidRecipient | Invalid recipient address | Use a valid address |
+| 8 | EscrowNotActive | Escrow is not in active status | Check escrow status |
+| 9 | EscrowAlreadyReleased | Escrow has already been released | No action needed |
+| 10 | EscrowAlreadyRefunded | Escrow has already been refunded | No action needed |
+| 11 | DisputeWindowClosed | Dispute window has closed | Contact support |
+| 12 | EvidenceSubmissionClosed | Evidence submission is closed | Contact support |
+| 13 | InvalidEvidenceHash | Invalid evidence hash | Provide a valid evidence hash |
+| 14 | ReleaseConditionsNotMet | Release conditions not met | Fulfill release conditions |
+| 15 | TimelockNotExpired | Timelock has not expired | Wait for timelock to expire |
+| 16 | ClawbackInProgress | A clawback is already in progress | Wait for clawback to complete |
+| 17 | ClawbackNotAuthorized | Clawback not authorized | Get admin authorization |
+| 18 | BatchSizeExceeded | Batch size exceeds limit | Reduce batch size |
+| 19 | MultiPartyThresholdNotMet | Multi-party threshold not met | Collect more signatures |
+| 20 | VestingNotStarted | Vesting has not started | Wait for vesting start time |
 
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `100` | `Unauthorized` | Caller lacks authorization for the invoked entry point. | Sign transaction with merchant, customer, or admin identity as required. |
-| `101` | `MetadataTooLarge` | Payload size exceeds maximum byte allowance. | Compact or hash metadata off-chain before submission. |
-| `102` | `NotesTooLarge` | Notes string exceeds maximum length. | Truncate notes text. |
-| `103` | `InvalidCurrency` | Currency asset code or token address is invalid or unsupported. | Use verified SEP-41 token contracts. |
-| `104` | `InvalidBatchSize` | Batch array is empty or exceeds the maximum batch limit. | Split batch into 1 to 50 operations. |
-| `105` | `BatchPartialFailure` | One or more items in the batch transfer failed. | Inspect individual transaction statuses and retry failed items. |
-| `106` | `RateLimitExceeded` | Calling frequency exceeds rate limit window. | Implement exponential backoff before retrying. |
-| `107` | `DailyVolumeExceeded` | Aggregate daily transaction volume ceiling breached. | Wait for rolling 24-hour limit reset or request tier increase. |
-| `108` | `AddressFlagged` | Sender or recipient address is flagged by compliance. | Contact compliance operations for identity verification. |
-| `109` | `AddressAlreadyFlagged` | Address already exists in compliance flagged list. | No action required. |
-| `110` | `AmountExceedsLimit` | Transaction amount exceeds single-payment maximum. | Reduce transaction amount. |
-| `111` | `MultiSigNotInitialized` | Multisig governance threshold has not been configured. | Configure multisig admin parameters. |
-| `112` | `InsufficientAdmins` | Total admin count is below required threshold. | Register additional administrators. |
+## Refund Contract
 
-### Payment Lifecycle Errors (`200`–`299`)
+### RefundError
 
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `200` | `NotFound` | Payment ID does not exist in contract storage. | Verify payment identifier. |
-| `201` | `InvalidStatus` | Payment status does not allow the requested state transition. | Check payment status (`Pending`, `Completed`, `Cancelled`, `Refunded`). |
-| `202` | `AlreadyProcessed` | Payment has already been finalized or refunded. | Do not resubmit completed settlements. |
-| `203` | `Expired` | Payment invoice expired before completion. | Create a new payment invoice. |
-| `204` | `NotExpired` | Operation can only be performed after expiration. | Wait for expiration timestamp to elapse. |
-| `205` | `NoExpiration` | Payment invoice has no expiration timestamp configured. | Ensure payment has an active deadline before checking expiration. |
-| `206` | `TransferFailed` | Underling token transfer invocation failed. | Check account balance and token allowance. |
-| `207` | `RefundExceedsPayment` | Requested refund exceeds the original paid amount. | Adjust refund amount. |
-| `208` | `NotYetDue` | Scheduled settlement delay has not elapsed. | Wait for settlement timelock to mature. |
-| `209` | `ScheduledPaymentCancelled` | Scheduled payment was cancelled prior to execution. | Re-schedule payment if necessary. |
-| `210` | `MetadataAlreadySet` | Payment metadata is immutable and has already been set. | Do not re-submit metadata. |
-| `211` | `MetadataNotFound` | Metadata for payment does not exist. | Submit metadata prior to query. |
-| `212` | `HashMismatch` | Provided metadata content hash does not match committed hash. | Verify raw metadata against initial Keccak-256 digest. |
-| `213` | `AlreadyFullyPaid` | Payment invoice has already been fully satisfied. | Prevent redundant checkout payments. |
+| Code | Name | Message | Resolution |
+|------|------|---------|------------|
+| 1 | RefundNotFound | Refund not found | Verify the refund ID |
+| 2 | RefundAlreadyProcessed | Refund already processed | No action needed |
+| 3 | RefundNotEligible | Refund not eligible | Check eligibility criteria |
+| 4 | RefundWindowExpired | Refund window has expired | Contact support |
+| 5 | Unauthorized | Not authorized | Use an authorized account |
+| 6 | InvalidAmount | Invalid refund amount | Use a valid amount |
+| 7 | MerchantNotEligible | Merchant not eligible for refunds | Contact support |
+| 8 | RefundAlreadyExists | Refund already exists for this payment | No action needed |
+| 9 | ArbitrationInProgress | Arbitration is already in progress | Wait for arbitration result |
+| 10 | ArbitrationTimeout | Arbitration has timed out | Contact support |
+| 11 | InsufficientStake | Insufficient arbitration stake | Increase stake amount |
+| 12 | PolicyNotConfigured | Refund policy not configured | Configure policy first |
+| 13 | CircuitBreakerTripped | Circuit breaker has been tripped | Wait for circuit breaker to reset |
+| 14 | RateLimitExceeded | Rate limit exceeded | Wait for rate limit reset |
+| 15 | CooldownActive | Refund cooldown is active | Wait for cooldown period |
 
-### Subscription & Recurring Billing Errors (`300`–`399`)
+## Admin Contract
 
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `300` | `NotFound` | Subscription record not found. | Check subscription ID. |
-| `301` | `NotActive` | Subscription is paused, cancelled, or expired. | Reactivate subscription. |
-| `302` | `PaymentNotDue` | Billing cycle interval has not arrived. | Wait for the next billing interval. |
-| `303` | `MaxRetriesExceeded` | Maximum dunning retry attempts exhausted. | Update customer payment method or cancel subscription. |
-| `304` | `Ended` | Subscription reached end of term. | Renew subscription. |
-| `305` | `DunningNotFound` | Dunning schedule record not found. | Verify subscription delinquency status. |
-| `306` | `NotInDunning` | Subscription is in good standing. | Normal execution path applies. |
-| `307` | `RetryNotDue` | Dunning backoff interval has not elapsed. | Wait for scheduled retry time. |
-| `308` | `GracePeriodExpired` | Dunning grace period elapsed without payment. | Cancel delinquent subscription and trigger recovery. |
-| `309` | `RetryTooEarly` | Attempted retry prior to minimum backoff delay. | Adhere to dunning retry schedule. |
-| `310` | `MeteredNotFound` | Metered billing usage record not found. | Record usage before invoicing. |
-| `311` | `BillingCapExceeded` | Metered usage exceeds spending ceiling. | Increase spending cap or pause service. |
-| `312` | `GroupNotFound` | Shared billing group record not found. | Create group plan. |
-| `313` | `AlreadyInGroup` | Account is already an active member of the group. | No action required. |
+### AdminError
 
-### Proposal & Feature Errors (`400`–`530`)
+| Code | Name | Message | Resolution |
+|------|------|---------|------------|
+| 1 | AlreadyInitialized | Contract already initialized | No action needed |
+| 2 | NotInitialized | Contract not initialized | Initialize contract first |
+| 3 | Unauthorized | Admin authentication required | Use an admin account |
 
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `400` | `NotFound` | Multisig proposal not found. | Verify proposal ID. |
-| `401` | `Expired` | Proposal voting period expired. | Submit new proposal. |
-| `402` | `AlreadyExecuted` | Proposal has already been executed. | Do not re-execute. |
-| `403` | `ThresholdNotMet` | Approval count does not meet multisig threshold. | Collect required administrator signatures. |
-| `404` | `RequiresMultiSig` | Action restricted to multisig proposal execution. | Create a governance proposal. |
-| `405` | `InsufficientApprovals` | Not enough approvals collected. | Add signatures. |
-| `406` | `ProposalExpired` | Proposal voting deadline passed. | File replacement proposal. |
-| `500` | `EscrowMappingNotFound` | Cross-contract escrow mapping not found. | Register escrow link. |
-| `501` | `EscrowBridgeFailed` | Cross-contract invocation to escrow failed. | Check escrow contract health and arguments. |
-| `502` | `FeeConfigNotFound` | Protocol fee parameters not set. | Configure fee schedule. |
-| `503` | `InsufficientFees` | Sweep amount exceeds accumulated protocol fees. | Restrict sweep to `sweep_amount <= accumulated_fees`. |
-| `527` | `SpendLimitExceeded` | Customer rolling spend limit exceeded. | Wait for rolling spend window reset. |
+## Client Integration
 
----
+When building frontend or backend integrations, handle errors by checking the error code and displaying the corresponding message to users. All error codes are deterministic and can be safely used for programmatic handling.
 
-## 🔒 Escrow Contract (`core/contracts/escrow`)
+### TypeScript Example
 
-### Basic & Multisig Errors (`100`–`199`)
+```typescript
+function handleContractError(error: any): string {
+  const code = error?.code ?? error?.errorCode;
+  const errorMap: Record<number, string> {
+    106: 'Too many requests. Please wait a moment and try again.',
+    107: 'Daily limit exceeded. Please try again tomorrow.',
+    108: 'This address has been flagged. Contact support.',
+    // ... add more mappings
+  };
+  return errorMap[code] ?? 'An unexpected error occurred. Please try again.';
+}
+```
 
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `100` | `Unauthorized` | Caller lacks authorization. | Provide authorized signer key. |
-| `101` | `NotAnAdmin` | Caller is not a registered admin. | Use admin identity. |
-| `102` | `AlreadyApproved` | Admin has already approved this proposal. | Wait for remaining admins. |
-| `103` | `ContractPaused` | Escrow contract is currently paused by admin orchestrator. | Wait for emergency unpause. |
-| `104` | `DuplicateApproval` | Duplicate approval received. | Ignore duplicate. |
-| `105` | `MultiSigNotInitialized` | Admin threshold parameters uninitialized. | Initialize contract multisig. |
-| `106` | `MigrationNotStarted` | Storage migration has not been initiated. | Initiate migration sequence. |
-| `107` | `AlreadyMigrated` | Target record already migrated to new schema. | No action required. |
-| `108` | `ParticipantNotFound` | Participant address not found in escrow. | Check participant address. |
-| `109` | `InvalidMerkleProof` | Merkle proof verification failed. | Check proof leaf and sibling path. |
-| `110` | `RootAlreadyCommitted` | Merkle root already committed for this escrow. | Roots are immutable. |
-| `111` | `InvalidBps` | Basis points value exceeds 10,000 (100%). | Ensure basis points sum to <= 10,000. |
-| `112` | `InsufficientAdmins` | Number of admins below threshold. | Add admins before proposing. |
+### Python Example
 
-### Escrow State Errors (`200`–`299`)
+```python
+ERROR_MESSAGES = {
+    106: "Too many requests. Please wait a moment and try again.",
+    107: "Daily limit exceeded. Please try again tomorrow.",
+    108: "This address has been flagged. Contact support.",
+    # ... add more mappings
+}
 
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `200` | `NotFound` | Escrow ID not found. | Verify escrow ID. |
-| `201` | `InvalidStatus` | Escrow status does not permit this action. | Check status (`Locked`, `Released`, `Disputed`, etc.). |
-| `202` | `AlreadyProcessed` | Escrow has already been released or refunded. | Do not re-process final escrows. |
-| `203` | `ReleaseNotYetAvailable` | Timelock or milestone condition has not been met. | Wait for condition fulfillment. |
-| `204` | `TimeoutNotReached` | Expiration or delay timeout has not arrived. | Wait for ledger timestamp to advance. |
-| `205` | `ReleaseOnHoldPeriod` | Mandatory hold period active. | Wait for hold period to clear. |
-| `206` | `InvalidVestingSchedule` | Vesting parameters (cliff, duration) invalid. | Check vesting configuration. |
-| `207` | `CliffPeriodNotPassed` | Vesting cliff has not elapsed. | Wait for cliff date. |
-| `208` | `MilestoneAlreadyReleased` | Milestone tranche already paid out. | Check next milestone. |
-| `209` | `EscrowNotExpired` | Escrow expiration date has not arrived. | Expiration action requires elapsed deadline. |
-| `210` | `EscrowAlreadyExpired` | Escrow already passed expiration deadline. | Trigger expired escrow refund. |
-| `211` | `ExpiryBeforeRelease` | Expiration timestamp cannot precede release timestamp. | Adjust timestamps. |
-| `212` | `ClawbackDelayTooShort` | Clawback delay parameter must be >= 86,400s (24 hours). | Increase delay to minimum 24 hours. |
-| `213` | `InvalidDisputeWindow` | Dispute window duration configuration invalid. | Provide valid window. |
-| `214` | `DisputeWindowPassed` | Dispute filing deadline has elapsed. | Dispute cannot be opened after window closes. |
-| `215` | `EvidenceDeadlinePassed` | Counter-evidence submission window closed. | Check if deadline extension applies. |
-| `216` | `DisputeAlreadyOpen` | An active dispute is already open for this escrow. | Submit evidence to existing dispute. |
-| `217` | `DisputeNotFound` | No dispute record exists for this escrow. | File dispute before requesting resolution. |
-| `218` | `ResolutionThresholdNotMet` | Arbitrator consensus threshold not reached. | Collect required arbitrator rulings. |
-
-### Actions & Secondary Errors (`300`–`399`)
-
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `300` | `NotReady` | Precondition delay not satisfied. | Wait for execution window. |
-| `301` | `NotDisputed` | Operation requires escrow in `Disputed` status. | Open dispute first. |
-| `302` | `ObserverAlreadyAdded` | Observer address already registered. | Do not add duplicate observer. |
-| `303` | `ObserverNotFound` | Target observer address not registered. | Register observer before lookup. |
-| `304` | `AccelerationLimitExceeded` | Vesting acceleration exceeds maximum allowed. | Cap acceleration rate. |
-| `305` | `TransferNotAllowed` | Beneficiary transfer restricted on this escrow. | Check transfer restrictions. |
-| `306` | `SameBeneficiary` | New beneficiary address identical to current. | Provide distinct beneficiary. |
-| `307` | `ConditionAlreadyEvaluated` | Milestone condition has already evaluated. | Proceed to next milestone. |
-| `308` | `StaleThresholdNotConfigured` | Stale timeout value unconfigured. | Set threshold before invocation. |
-| `309` | `SwapConfigNotFound` | Asset exchange routing parameters not found. | Configure DEX router. |
-| `310` | `SwapOutputBelowMinimum` | Slippage tolerance exceeded minimum output amount. | Adjust slippage or wait for liquidity. |
-| `311` | `SwapAlreadyExecuted` | Token conversion already executed. | Do not re-run swap. |
-
----
-
-## 🔄 Refund & Arbitration Contract (`core/contracts/refund`)
-
-| Error Code | Name | Description | Recommended Client Action |
-| :---: | :--- | :--- | :--- |
-| `1` | `NotFound` | Refund request record not found. | Verify refund request ID. |
-| `2` | `Unauthorized` | Caller lacks permission to act on refund. | Sign with customer or merchant key. |
-| `3` | `InvalidStatus` | Refund in invalid status for this operation. | Verify refund status (`Requested`, `Approved`, `Denied`, `Appealed`). |
-| `4` | `AlreadyProcessed` | Refund already processed and finalized. | Do not re-submit finalized refund. |
-| `5` | `AmountExceedsPayment` | Refund amount exceeds original purchase total. | Reduce refund amount. |
-| `6` | `CooldownActive` | Mandatory cooling-off period active between attempts. | Wait for cooldown interval to pass. |
-| `7` | `AppealWindowExpired` | Appeal filing window elapsed after denial. | Appeals must be filed within active appeal window. |
-| `8` | `InvalidArbitrator` | Arbitrator address is not registered or active. | Use active registered arbitrator. |
-| `9` | `DisputeAlreadyResolved` | Dispute appeal already resolved. | Final rulings cannot be overturned. |
-| `10` | `VoucherExpired` | Store credit voucher validity period elapsed. | Request voucher reissuance if merchant allows. |
-| `34` | `ArbitratorNotFound` | Arbitrator record not found in registry. | Register arbitrator first. |
-| `35` | `InvalidScoreThreshold` | Reputation score threshold configuration invalid. | Provide valid score range. |
-| `36` | `AutoRefundTriggerNotFound` | Auto-refund trigger condition missing. | Configure trigger rule. |
-| `37` | `DuplicateAutoRefundTrigger` | Auto-refund trigger already exists. | Use existing trigger ID. |
-| `38` | `AddressFlaggedForFraud` | Account address flagged for abusive refund requests. | Contact platform security. |
-| `40` | `FraudSignalNotFound` | Fraud metric signal not found. | Ingest telemetry signal first. |
-| `41` | `HookNotFound` | Webhook subscription record not found. | Verify hook ID. |
-| `42` | `MaxHooksPerEventReached` | Maximum registered webhooks limit reached. | Remove obsolete hooks before adding new ones. |
+def handle_contract_error(error_code: int) -> str:
+    return ERROR_MESSAGES.get(error_code, "An unexpected error occurred. Please try again.")
+```

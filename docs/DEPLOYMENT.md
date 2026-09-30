@@ -4,23 +4,38 @@ This guide walks you through building, setting up identities, funding accounts, 
 
 ---
 
-## Architecture & Workspaces
+## Gas Consumption Limits
 
-Cypher GridPay contracts are divided into two distinct Cargo workspaces:
+The `admin` contract dispatches calls to the `payment`, `escrow`, and `refund`
+contracts in a single Soroban transaction. The table below records the measured
+resource consumption of the multi-contract dispatch entry points under the
+Soroban test environment (Issue #81).
 
-1. **`core` workspace** (`core/`):
-   - **Payment Contract** (`core/contracts/payment`): Handles invoices, payment processing, fee accounting, and settlement delays.
-   - **Escrow Contract** (`core/contracts/escrow`): Manages conditional escrow locks, multi-sig approvals, dispute holds, and clawbacks.
-   - **Refund Contract** (`core/contracts/refund`): Implements customer dispute resolution, appeals, arbitrator registries, and auto-refund triggers.
+| Entry point | CPU instructions | Memory bytes | Dominant cost |
+| --- | --- | --- | --- |
+| `emergency_pause_all` | ~549,000 | ~74,200 | 3 cross-contract `pause_contract` calls |
+| `emergency_unpause_all` | ~801,000 | ~113,500 | 3 cross-contract `unpause_contract` calls |
+| `get_system_status` | ~440,000 | ~62,700 | 6 read-only cross-contract queries |
 
-2. **`orchestrator` workspace** (`orchestrator/`):
-   - **Admin Orchestrator Contract** (`orchestrator/contracts/admin`): Cross-contract coordinator providing unified administrative controls, emergency pausing, and component contract address registry.
+### Budget limits
+
+- **CPU instruction limit:** 1,000,000,000 instructions per transaction (current Soroban network limit).
+- **Memory limit:** 40,000,000 bytes per transaction.
+- The most expensive dispatch (`emergency_unpause_all`) uses roughly **0.08% of the CPU budget** and **0.3% of the memory budget**, leaving ample headroom for the surrounding transaction (signature verification, transaction size, etc.).
+
+> **Note:** Measurements are taken in the Soroban test environment, which
+> underestimates CPU and memory relative to the WASM equivalent. Treat the
+> numbers above as lower bounds when provisioning mainnet capacity.
+
+### Optimization notes
+
+- The dispatch cost is dominated by the cross-contract calls, which are irreducible: each child contract must be paused/unpaused individually, and each read-only health query is a separate cross-contract call.
+- The admin contract reads the three child contract addresses through a single shared helper (`get_contract_addresses`) to avoid duplicating storage reads and error handling across dispatch functions.
+- The `reason` string passed to `emergency_pause_all` is cloned once per child contract call, which is unavoidable because each child contract requires its own copy.
 
 ---
 
-## Deployment Order
-
-Because the Admin Orchestrator references the deployed addresses of the core contracts, deployment **must** proceed in this strict sequential order:
+## Prerequisites
 
 ```
 Step 1: Payment Contract   (core)
@@ -44,177 +59,233 @@ Step 5: Initialize Admin Orchestrator with Step 1-3 addresses
    cargo install --locked stellar-cli --features opt
    ```
 
-3. **Stellar Network Configuration**:
+3. **jq** (for JSON processing):
    ```bash
-   # Add Testnet
-   stellar network add --global testnet \
-     --rpc-url "https://soroban-testnet.stellar.org:443" \
-     --network-passphrase "Test SDF Network ; September 2015"
+   # macOS
+   brew install jq
+   # Ubuntu/Debian
+   apt-get install jq
    ```
 
 ---
 
-## Step 1: Identity & Key Management
+## Deployment Order
 
-Generate and fund the deployment admin identity:
+The contracts must be deployed and initialized in the following order due to cross-contract dependencies:
 
-```bash
-# Generate deployer keypair
-stellar keys generate --network testnet deployer
+### Step 1: Deploy Payment Contract
 
-# Fund deployer account via Testnet Friendbot
-stellar keys fund deployer --network testnet
-
-# Verify balance
-stellar keys balance deployer --network testnet
-```
-
----
-
-## Step 2: Build WASM Artifacts Across Workspaces
-
-Compile optimized WASM binaries for all contracts:
+The payment contract is the core entry point for creating and managing payments.
 
 ```bash
-# Build core contracts (Payment, Escrow, Refund)
+# Build the payment contract
 cd core
-stellar contract build
-cd ..
-
-# Build orchestrator contract (Admin)
-cd orchestrator
-stellar contract build
-cd ..
-
-# Alternatively, build both via root Makefile:
 make build
-```
+cd ..
 
-Compiled WASMs will be located at:
-- `target/wasm32-unknown-unknown/release/payments.wasm`
-- `target/wasm32-unknown-unknown/release/escrow.wasm`
-- `target/wasm32-unknown-unknown/release/refund.wasm`
-- `target/wasm32-unknown-unknown/release/admin.wasm`
-
-Verify each binary does not exceed the 256 KB (262,144 bytes) limit via:
-```bash
-make check-size
-```
-
----
-
-## Step 3: Sequential Contract Deployment
-
-### 1. Deploy Payment Contract
-```bash
+# Deploy to testnet
 PAYMENT_ID=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/payments.wasm \
-  --source deployer \
-  --network testnet)
+    --wasm core/target/wasm32v1-none/release/payment.wasm \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    --alias payment)
 
-echo "Payment Contract Address: $PAYMENT_ID"
+echo "Payment contract deployed: $PAYMENT_ID"
 ```
 
-### 2. Deploy Escrow Contract
+### Step 2: Deploy Escrow Contract
+
+The escrow contract holds funds during the payment lifecycle.
+
 ```bash
 ESCROW_ID=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/escrow.wasm \
-  --source deployer \
-  --network testnet)
+    --wasm core/target/wasm32v1-none/release/escrow.wasm \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    --alias escrow)
 
-echo "Escrow Contract Address: $ESCROW_ID"
+echo "Escrow contract deployed: $ESCROW_ID"
 ```
 
-### 3. Deploy Refund Contract
+### Step 3: Deploy Refund Contract
+
+The refund contract handles refund processing and arbitration.
+
 ```bash
 REFUND_ID=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/refund.wasm \
-  --source deployer \
-  --network testnet)
+    --wasm core/target/wasm32v1-none/release/refund.wasm \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    --alias refund)
 
-echo "Refund Contract Address: $REFUND_ID"
+echo "Refund contract deployed: $REFUND_ID"
 ```
 
-### 4. Deploy Admin Orchestrator Contract
+### Step 4: Deploy Admin Contract
+
+The admin contract orchestrates the other three contracts and provides administrative control.
+
 ```bash
 ADMIN_ID=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/admin.wasm \
-  --source deployer \
-  --network testnet)
+    --wasm orchestrator/target/wasm32v1-none/release/admin.wasm \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    --alias admin)
 
-echo "Admin Orchestrator Address: $ADMIN_ID"
+echo "Admin contract deployed: $ADMIN_ID"
 ```
 
----
+### Step 5: Initialize Admin Contract
 
-## Step 4: Admin Orchestrator Initialization
-
-Link the deployed contracts by initializing the Admin Orchestrator:
+Initialize the admin contract with the addresses of the other three deployed contracts.
 
 ```bash
-ADMIN_ADDRESS=$(stellar keys address deployer)
-PAUSER_ADDRESS=$(stellar keys address deployer)
-
 stellar contract invoke \
-  --id "$ADMIN_ID" \
-  --source deployer \
-  --network testnet \
-  -- \
-  initialize \
-  --admin "$ADMIN_ADDRESS" \
-  --pauser "$PAUSER_ADDRESS" \
-  --payment_contract "$PAYMENT_ID" \
-  --escrow_contract "$ESCROW_ID" \
-  --refund_contract "$REFUND_ID"
+    --id $ADMIN_ID \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    -- initialize \
+    --admin <YOUR_ACCOUNT_ADDRESS> \
+    --pauser <YOUR_ACCOUNT_ADDRESS> \
+    --payment_contract $PAYMENT_ID \
+    --escrow_contract $ESCROW_ID \
+    --refund_contract $REFUND_ID
 ```
 
----
-
-## Step 5: Verification & Health Checks
-
-Verify that the orchestrator correctly reports contract addresses and status:
+### Step 6: Initialize Payment Contract
 
 ```bash
-# Query Payment Contract registered address
 stellar contract invoke \
-  --id "$ADMIN_ID" \
-  --source deployer \
-  --network testnet \
-  -- \
-  get_payment_contract
+    --id $PAYMENT_ID \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    -- initialize \
+    --admin <YOUR_ACCOUNT_ADDRESS>
+```
 
-# Query Escrow Contract registered address
-stellar contract invoke \
-  --id "$ADMIN_ID" \
-  --source deployer \
-  --network testnet \
-  -- \
-  get_escrow_contract
+### Step 7: Initialize Escrow Contract
 
-# Query Refund Contract registered address
+```bash
 stellar contract invoke \
-  --id "$ADMIN_ID" \
-  --source deployer \
-  --network testnet \
-  -- \
-  get_refund_contract
+    --id $ESCROW_ID \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    -- initialize \
+    --admin <YOUR_ACCOUNT_ADDRESS>
+```
+
+### Step 8: Initialize Refund Contract
+
+```bash
+stellar contract invoke \
+    --id $REFUND_ID \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    -- initialize \
+    --admin <YOUR_ACCOUNT_ADDRESS>
+```
+
+### Step 9: Configure Cross-Contract References
+
+Register the escrow contract address in the payment contract:
+
+```bash
+stellar contract invoke \
+    --id $PAYMENT_ID \
+    --source <YOUR_SECRET_KEY> \
+    --network testnet \
+    -- set_escrow_contract \
+    --escrow_contract $ESCROW_ID
 ```
 
 ---
 
-## Deployment Manifest Record
+## Automated Deployment
 
-Save the resulting contract addresses to an environment file or deployment manifest for client integrations:
+For automated deployment, use the provided script:
 
-```json
-{
-  "network": "testnet",
-  "deployed_at": "2026-09-28T00:00:00Z",
-  "contracts": {
-    "payment": "C...",
-    "escrow": "C...",
-    "refund": "C...",
-    "admin": "C..."
-  }
-}
+```bash
+export ADMIN_ADDRESS=<YOUR_ACCOUNT_ADDRESS>
+export ADMIN_SECRET=<YOUR_SECRET_KEY>
+./scripts/deploy-testnet.sh testnet
 ```
+
+This script handles all build, deploy, initialization, and cross-registration steps automatically.
+
+---
+
+## Admin Setup
+
+After deployment, configure the admin contract:
+
+1. **Add additional admins** (if using multi-sig):
+   ```bash
+   stellar contract invoke \
+       --id $PAYMENT_ID \
+       --source <YOUR_SECRET_KEY> \
+       --network testnet \
+       -- add_admin \
+       --new_admin <NEW_ADMIN_ADDRESS>
+   ```
+
+2. **Configure fee structure**:
+   ```bash
+   stellar contract invoke \
+       --id $PAYMENT_ID \
+       --source <YOUR_SECRET_KEY> \
+       --network testnet \
+       -- set_fee_config \
+       --fee_bps 100 \
+       --min_fee 0 \
+       --max_fee 0 \
+       --treasury <TREASURY_ADDRESS> \
+       --fee_token <TOKEN_ADDRESS> \
+       --active true
+   ```
+
+3. **Configure rate limits** (optional):
+   ```bash
+   stellar contract invoke \
+       --id $PAYMENT_ID \
+       --source <YOUR_SECRET_KEY> \
+       --network testnet \
+       -- set_rate_limit_config \
+       --max_payments_per_window 10 \
+       --window_duration 60 \
+       --max_payment_amount 1000000000 \
+       --max_daily_volume 10000000000
+   ```
+
+---
+
+## Verification
+
+After deployment, verify all contracts are properly configured:
+
+```bash
+# Check admin contract
+stellar contract invoke --id $ADMIN_ID --network testnet -- get_admin
+
+# Check payment contract
+stellar contract invoke --id $PAYMENT_ID --network testnet -- get_admin
+
+# Check escrow contract
+stellar contract invoke --id $ESCROW_ID --network testnet -- get_admin
+
+# Check refund contract
+stellar contract invoke --id $REFUND_ID --network testnet -- get_admin
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"already initialized" error**: The contract has already been initialized. Check the contract state.
+2. **"unauthorized" error**: The admin key doesn't match the configured admin address.
+3. **WASM too large**: Run `make check-size` to verify the WASM binary doesn't exceed 256KB.
+
+### Resetting
+
+To redeploy from scratch, generate a new WASM hash and deploy with a new alias or contract ID.
