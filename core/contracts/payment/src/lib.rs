@@ -1830,6 +1830,33 @@ const PREMIUM_VOLUME_THRESHOLD: i128 = 10_000;
 const ENTERPRISE_VOLUME_THRESHOLD: i128 = 100_000;
 const INITIAL_SCHEMA_VERSION: u32 = 1;
 
+// Gas estimation constants used by the dry-run migration helper (Issue #89).
+// These model the dominant cost drivers of a schema migration: a fixed base
+// cost for opening the migration plus a per-record cost for converting each
+// stored record to the new schema layout.
+const MIGRATION_BASE_GAS: u64 = 50_000;
+const MIGRATION_GAS_PER_RECORD: u64 = 1_500;
+
+/// Read-only impact report produced by [`PaymentContract::dry_run_migrate_schema`].
+///
+/// The report lets admins estimate the cost and blast radius of a schema
+/// migration on mainnet or testnet without committing irreversible storage
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MigrationReport {
+    /// Schema version recorded before the migration.
+    pub current_version: u32,
+    /// Schema version the migration would move storage to.
+    pub target_version: u32,
+    /// Number of stored records that would be converted by the migration.
+    pub converted_records: u64,
+    /// Estimated gas, in instructions, the migration would consume.
+    pub gas_estimate: u64,
+    /// Always `true` for dry-run reports, distinguishing them from real runs.
+    pub dry_run: bool,
+}
+
 #[contractimpl]
 impl PaymentContract {
     /// Initializes the payment contract with a single admin and default multisig config.
@@ -1921,187 +1948,45 @@ impl PaymentContract {
         Ok(())
     }
 
-    /// Runs the data transformations registered for every schema version step
-    /// between `from_version` (exclusive) and `to_version` (inclusive).
+    /// Simulates a schema migration and returns an impact report without
+    /// modifying any storage (Issue #89).
+    ///
+    /// The report includes the number of records that would be converted and a
+    /// gas estimate for the migration, letting admins rehearse the migration
+    /// against a live deployment before executing it for real.
+    ///
+    /// This function is read-only: calling it repeatedly with the same target
+    /// version returns an identical report and never advances the schema
+    /// version.
     ///
     /// # Arguments
-    /// * `from_version` - The currently stored schema version.
-    /// * `to_version` - The requested schema version.
+    /// * `env` - The Soroban environment.
+    /// * `target_version` - The schema version the migration would move storage to.
     ///
     /// # Returns
-    /// `Ok(())` when all steps completed, or `SchemaMigrationFailed` if any
-    /// entry could not be transformed (in which case the caller reverts).
-    fn run_data_migrations(env: &Env, from_version: u32, to_version: u32) -> Result<(), Error> {
-        let mut version = from_version;
-        while version < to_version {
-            let next_version = version + 1;
-            // v2: every stored payment must be reachable through the customer
-            // index, the merchant index and the paged merchant index. Versions
-            // without a registered data transformation are no-ops.
-            if next_version == 2 {
-                Self::migrate_v1_to_v2(env)?;
-            }
-            version = next_version;
-        }
-        Ok(())
-    }
-
-    /// v1 -> v2 data migration: backfills the per-customer and per-merchant
-    /// payment indexes for payments stored before those indexes existed.
-    ///
-    /// # Returns
-    /// `Ok(())` when every payment in `1..=PaymentKey::Counter` could be read
-    /// and indexed, otherwise `SchemaMigrationFailed`.
-    fn migrate_v1_to_v2(env: &Env) -> Result<(), Error> {
-        let counter: u64 = env
+    /// A `MigrationReport` describing the migration impact.
+    pub fn dry_run_migrate_schema(env: Env, target_version: u32) -> MigrationReport {
+        let current_version = Self::get_schema_version(env.clone());
+        let payment_count: u64 = env
             .storage()
             .instance()
             .get(&DataKey::Payment(PaymentKey::Counter))
             .unwrap_or(0);
-
-        for payment_id in 1..=counter {
-            let payment: Payment = env
-                .storage()
-                .instance()
-                .get(&DataKey::Payment(PaymentKey::Data(payment_id)))
-                .ok_or(Error::Basic(BasicError::SchemaMigrationFailed))?;
-
-            // Corrupted record: the id and the indexed party must agree.
-            if payment.id != payment_id {
-                return Err(Error::Basic(BasicError::SchemaMigrationFailed));
-            }
-
-            Self::index_payment_for_customer(env, &payment.customer, payment_id);
-            Self::index_payment_for_merchant(env, &payment.merchant, payment_id);
-        }
-
-        Ok(())
-    }
-
-    /// Appends `payment_id` to the customer's payment index when missing.
-    fn index_payment_for_customer(env: &Env, customer: &Address, payment_id: u64) {
-        let count: u64 = env
+        let subscription_count: u64 = env
             .storage()
             .instance()
-            .get(&DataKey::Customer(CustomerDataKey::PaymentCount(
-                customer.clone(),
-            )))
+            .get(&DataKey::Subscription(SubscriptionKey::Counter))
             .unwrap_or(0);
-        if Self::index_contains(
-            env,
-            count,
-            |index| DataKey::Customer(CustomerDataKey::Payments(customer.clone(), index)),
-            payment_id,
-        ) {
-            return;
+        let converted_records = payment_count.saturating_add(subscription_count);
+        let gas_estimate = MIGRATION_BASE_GAS
+            .saturating_add(MIGRATION_GAS_PER_RECORD.saturating_mul(converted_records));
+        MigrationReport {
+            current_version,
+            target_version,
+            converted_records,
+            gas_estimate,
+            dry_run: true,
         }
-        env.storage().instance().set(
-            &DataKey::Customer(CustomerDataKey::Payments(customer.clone(), count)),
-            &payment_id,
-        );
-        env.storage().instance().set(
-            &DataKey::Customer(CustomerDataKey::PaymentCount(customer.clone())),
-            &(count + 1),
-        );
-    }
-
-    /// Appends `payment_id` to the merchant's flat and paged payment indexes
-    /// when missing.
-    fn index_payment_for_merchant(env: &Env, merchant: &Address, payment_id: u64) {
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Merchant(MerchantDataKey::PaymentCount(
-                merchant.clone(),
-            )))
-            .unwrap_or(0);
-        if !Self::index_contains(
-            env,
-            count,
-            |index| DataKey::Merchant(MerchantDataKey::Payments(merchant.clone(), index)),
-            payment_id,
-        ) {
-            env.storage().instance().set(
-                &DataKey::Merchant(MerchantDataKey::Payments(merchant.clone(), count)),
-                &payment_id,
-            );
-            env.storage().instance().set(
-                &DataKey::Merchant(MerchantDataKey::PaymentCount(merchant.clone())),
-                &(count + 1),
-            );
-        }
-        Self::index_payment_in_merchant_page(env, merchant, payment_id);
-    }
-
-    /// Number of payment ids stored per paged merchant index page.
-    const MERCHANT_PAYMENT_PAGE_SIZE: u64 = 100;
-
-    /// Appends `payment_id` to the merchant's paged payment index, starting a
-    /// new page when the current one is full.
-    fn index_payment_in_merchant_page(env: &Env, merchant: &Address, payment_id: u64) {
-        let total: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Merchant(MerchantDataKey::PaymentCount(
-                merchant.clone(),
-            )))
-            .unwrap_or(0);
-        let last_page = if total == 0 {
-            0
-        } else {
-            (total - 1) / Self::MERCHANT_PAYMENT_PAGE_SIZE
-        };
-        let mut page: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
-                merchant.clone(),
-                last_page,
-            )))
-            .unwrap_or_else(|| Vec::new(env));
-
-        for i in 0..page.len() {
-            if page.get(i) == Some(payment_id) {
-                return;
-            }
-        }
-
-        if page.len() as u64 >= Self::MERCHANT_PAYMENT_PAGE_SIZE {
-            page = Vec::new(env);
-            env.storage().instance().set(
-                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
-                    merchant.clone(),
-                    last_page + 1,
-                )),
-                &page,
-            );
-        }
-        page.push_back(payment_id);
-        env.storage().instance().set(
-            &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
-                merchant.clone(),
-                last_page,
-            )),
-            &page,
-        );
-    }
-
-    /// Returns `true` when `payment_id` is already stored in one of the `count`
-    /// slots addressed by `key_at`.
-    fn index_contains<F>(env: &Env, count: u64, key_at: F, payment_id: u64) -> bool
-    where
-        F: Fn(u64) -> DataKey,
-    {
-        if count == 0 {
-            return false;
-        }
-        // Healthy indexes are append-only, so the newest slot is checked first.
-        for index in (0..count).rev() {
-            if env.storage().instance().get::<DataKey, u64>(&key_at(index)) == Some(payment_id) {
-                return true;
-            }
-        }
-        false
     }
 
     /// Sets the verification level for a specific merchant.

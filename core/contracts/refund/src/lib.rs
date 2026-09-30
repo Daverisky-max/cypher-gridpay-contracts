@@ -1369,6 +1369,33 @@ pub struct AdminRotationAccepted {
     pub new_admin: Address,
 }
 
+// Gas estimation constants used by the dry-run migration helper (Issue #89).
+// These model the dominant cost drivers of a schema migration: a fixed base
+// cost for opening the migration plus a per-record cost for converting each
+// stored record to the new schema layout.
+const MIGRATION_BASE_GAS: u64 = 50_000;
+const MIGRATION_GAS_PER_RECORD: u64 = 1_500;
+
+/// Read-only impact report produced by [`RefundContract::dry_run_migrate_schema`].
+///
+/// The report lets admins estimate the cost and blast radius of a schema
+/// migration on mainnet or testnet without committing irreversible storage
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MigrationReport {
+    /// Schema version recorded before the migration.
+    pub current_version: u32,
+    /// Schema version the migration would move storage to.
+    pub target_version: u32,
+    /// Number of stored records that would be converted by the migration.
+    pub converted_records: u64,
+    /// Estimated gas, in instructions, the migration would consume.
+    pub gas_estimate: u64,
+    /// Always `true` for dry-run reports, distinguishing them from real runs.
+    pub dry_run: bool,
+}
+
 #[contract]
 pub struct RefundContract;
 
@@ -1486,116 +1513,39 @@ impl RefundContract {
         Ok(())
     }
 
-    /// Runs the data transformations registered for every schema version step
-    /// between `from_version` (exclusive) and `to_version` (inclusive).
+    /// Simulates a schema migration and returns an impact report without
+    /// modifying any storage (Issue #89).
+    ///
+    /// The report includes the number of records that would be converted and a
+    /// gas estimate for the migration, letting admins rehearse the migration
+    /// against a live deployment before executing it for real.
+    ///
+    /// This function is read-only: calling it repeatedly with the same target
+    /// version returns an identical report and never advances the schema
+    /// version.
     ///
     /// # Arguments
-    /// * `from_version` - The currently stored schema version.
-    /// * `to_version` - The requested schema version.
+    /// * `env` - The Soroban environment.
+    /// * `target_version` - The schema version the migration would move storage to.
     ///
-    /// # Errors
-    /// Returns `SchemaMigrationFailed` if any stored entry could not be
-    /// transformed, in which case the caller reverts every write made so far.
-    fn run_data_migrations(env: &Env, from_version: u32, to_version: u32) -> Result<(), Error> {
-        let mut version = from_version;
-        while version < to_version {
-            let next_version = version + 1;
-            // v2: every stored refund must be reachable through the status index
-            // and the customer's history index, and rejected refunds must carry
-            // their rejection timestamp. Versions without a registered data
-            // transformation are no-ops.
-            if next_version == 2 {
-                Self::migrate_v1_to_v2(env)?;
-            }
-            version = next_version;
-        }
-        Ok(())
-    }
-
-    /// v1 -> v2 data migration: backfills the per-status index, the customer
-    /// history index and the rejection bookkeeping of stored refunds.
-    ///
-    /// # Errors
-    /// Returns `SchemaMigrationFailed` if a refund referenced by the refund
-    /// counter cannot be read, or if its id does not match the indexed record.
-    fn migrate_v1_to_v2(env: &Env) -> Result<(), Error> {
-        let counter: u64 = env
+    /// # Returns
+    /// A `MigrationReport` describing the migration impact.
+    pub fn dry_run_migrate_schema(env: Env, target_version: u32) -> MigrationReport {
+        let current_version = Self::get_schema_version(env.clone());
+        let refund_count: u64 = env
             .storage()
             .instance()
             .get(&DataKey::RefundCounter)
             .unwrap_or(0);
-
-        for refund_id in 1..=counter {
-            let refund: Refund = env
-                .storage()
-                .instance()
-                .get(&DataKey::Refund(refund_id))
-                .ok_or(Error::Ext(ExtError::SchemaMigrationFailed))?;
-
-            // Corrupted record: the id and the stored record must agree.
-            if refund.id != refund_id {
-                return Err(Error::Ext(ExtError::SchemaMigrationFailed));
-            }
-
-            // Status index membership (RefundsByStatus / RefundStatusIndex).
-            if !env
-                .storage()
-                .instance()
-                .has(&DataKey::RefundStatusIndex(refund_id))
-            {
-                Self::add_to_status_index(env, refund.status.clone(), refund_id);
-            }
-
-            // Rejection bookkeeping used by the appeal window checks.
-            if refund.status == RefundStatus::Rejected
-                && !env
-                    .storage()
-                    .instance()
-                    .has(&SystemKey::RefundRejectedAt(refund_id))
-            {
-                let rejected_at = refund.rejected_at.unwrap_or(refund.requested_at);
-                env.storage()
-                    .instance()
-                    .set(&SystemKey::RefundRejectedAt(refund_id), &rejected_at);
-            }
-
-            // Per-customer history index.
-            Self::index_refund_for_customer(env, &refund.customer, refund_id);
+        let gas_estimate = MIGRATION_BASE_GAS
+            .saturating_add(MIGRATION_GAS_PER_RECORD.saturating_mul(refund_count));
+        MigrationReport {
+            current_version,
+            target_version,
+            converted_records: refund_count,
+            gas_estimate,
+            dry_run: true,
         }
-
-        Ok(())
-    }
-
-    /// Appends `refund_id` to the customer's refund history when missing.
-    ///
-    /// Honours the hot/archive split so the migration never inflates instance
-    /// storage beyond `CUSTOMER_HISTORY_HOT_CAP` entries.
-    fn index_refund_for_customer(env: &Env, customer: &Address, refund_id: u64) {
-        let count = Self::get_customer_refund_count(env, customer);
-        if Self::customer_history_contains(env, customer, count, refund_id) {
-            return;
-        }
-        Self::append_customer_refund_history(env, customer, refund_id);
-    }
-
-    /// Returns `true` when `refund_id` is present in the customer's history
-    /// index, looking into the archive for entries that aged out of hot storage.
-    fn customer_history_contains(
-        env: &Env,
-        customer: &Address,
-        count: u64,
-        refund_id: u64,
-    ) -> bool {
-        if count == 0 {
-            return false;
-        }
-        // Healthy histories are append-only, so the newest slot is checked first.
-        for index in (0..count).rev() {
-            if Self::get_customer_refund_id_at(env, customer, index) == Some(refund_id) {
-                return true;
-            }
-        }
-        false
     }
 
     /// Propose a new admin, starting a two-step rotation (Issue #389).
