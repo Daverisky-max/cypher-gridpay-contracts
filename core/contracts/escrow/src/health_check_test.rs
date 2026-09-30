@@ -204,3 +204,72 @@ fn test_get_escrow_health_missing_escrow_fails() {
     let result = client.try_get_escrow_health(&999_u64);
     assert!(result.is_err());
 }
+
+
+#[test]
+fn test_health_views_leave_ledger_storage_untouched() {
+    let env = Env::default();
+    let (client, admin, customer, merchant, token) = setup(&env);
+    client.set_stale_threshold(&admin, &default_config());
+
+    env.ledger().set_timestamp(1_000);
+    let id = client.create_escrow(
+        &customer, &merchant, &500_i128, &token, &2_000_u64, &0_u64, &100_000_u64, &true,
+    );
+
+    let before = env.to_ledger_snapshot();
+
+    // Diagnostics must not write instance or persistent storage: no new keys,
+    // no changed values. TTL fields are ignored on purpose, since a host may
+    // legitimately bump them on access.
+    let _ = client.get_escrow_health(&id);
+    let _ = client.get_stale_escrows(&10_u32);
+    let _ = client.get_stale_threshold();
+
+    let after = env.to_ledger_snapshot();
+    assert_eq!(
+        before.ledger_entries.len(),
+        after.ledger_entries.len(),
+        "health_check created or removed a ledger entry"
+    );
+    for i in 0..before.ledger_entries.len() {
+        let (before_key, (before_entry, _before_ttl)) = &before.ledger_entries[i];
+        let (after_key, (after_entry, _after_ttl)) = &after.ledger_entries[i];
+        assert!(before_key == after_key, "health_check changed the ledger key set");
+        assert!(before_entry == after_entry, "health_check modified a ledger entry");
+    }
+}
+
+#[test]
+fn test_health_views_report_consistent_state() {
+    let env = Env::default();
+    let (client, admin, customer, merchant, token) = setup(&env);
+    client.set_stale_threshold(&admin, &default_config());
+
+    env.ledger().set_timestamp(1_000);
+    let id = client.create_escrow(
+        &customer, &merchant, &500_i128, &token, &2_000_u64, &0_u64, &100_000_u64, &true,
+    );
+
+    let token_client = token::Client::new(&env, &token);
+    let customer_balance = token_client.balance(&customer);
+    let merchant_balance = token_client.balance(&merchant);
+
+    // The diagnostics agree with the state they report on...
+    let report = client.get_escrow_health(&id);
+    assert_eq!(report.escrow_id, id);
+    assert_eq!(report.health, EscrowHealth::Healthy);
+    assert_eq!(report.seconds_until_expiry, Some(99_000));
+    assert_eq!(report.last_activity, 1_000);
+    assert_eq!(client.get_escrow_count_by_customer(&customer), 1);
+    assert_eq!(client.get_escrow_count_by_merchant(&merchant), 1);
+    assert!(client.get_stale_escrows(&10_u32).is_empty());
+    assert_eq!(
+        client.get_stale_threshold().unwrap().inactivity_seconds,
+        10_000
+    );
+
+    // ...and reporting on them moves no funds.
+    assert_eq!(token_client.balance(&customer), customer_balance);
+    assert_eq!(token_client.balance(&merchant), merchant_balance);
+}
