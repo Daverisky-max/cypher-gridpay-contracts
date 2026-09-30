@@ -160,6 +160,90 @@ fn test_execute_clawback_success() {
 }
 
 #[test]
+fn test_execute_clawback_at_exact_timelock_boundary() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_client = token::StellarAssetClient::new(&env, &token_id);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    token_client.mint(&customer, &1000);
+    let escrow_id = client.create_escrow(
+        &customer,
+        &merchant,
+        &1000_i128,
+        &token_id,
+        &1000_u64,
+        &0_u64,
+        &0_u64,
+        &false
+    );
+
+    let reason_hash = BytesN::from_array(&env, &[1_u8; 32]);
+    let delay = 86400_u64;
+    let request_id = client.initiate_clawback(&admin, &escrow_id, &reason_hash, &delay);
+
+    // Advance to exactly the timelock boundary; inclusive comparison must allow execution.
+    let request = client.get_clawback_request(&request_id).unwrap();
+    env.ledger().set_timestamp(request.execute_after);
+
+    client.execute_clawback(&admin, &request_id);
+
+    let request = client.get_clawback_request(&request_id).unwrap();
+    assert!(request.executed);
+}
+
+#[test]
+fn test_execute_clawback_before_delay_rejected() {
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    let escrow_id = client.create_escrow(
+        &customer,
+        &merchant,
+        &1000_i128,
+        &token,
+        &1000_u64,
+        &0_u64,
+        &0_u64,
+        &false
+    );
+
+    let reason_hash = BytesN::from_array(&env, &[1_u8; 32]);
+    let delay = 86400_u64;
+    let request_id = client.initiate_clawback(&admin, &escrow_id, &reason_hash, &delay);
+
+    // Only move time forward slightly, still before the timelock expires.
+    env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+
+    let result = client.try_execute_clawback(&admin, &request_id);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(EscrowError::ClawbackTimelockNotExpired)))
+    );
+
+    let request = client.get_clawback_request(&request_id).unwrap();
+    assert!(!request.executed);
+}
+
+#[test]
 #[should_panic]
 fn test_execute_clawback_before_delay() {
     let env = Env::default();
