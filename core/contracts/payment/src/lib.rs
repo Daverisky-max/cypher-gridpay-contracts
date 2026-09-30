@@ -1827,6 +1827,33 @@ const PREMIUM_VOLUME_THRESHOLD: i128 = 10_000;
 const ENTERPRISE_VOLUME_THRESHOLD: i128 = 100_000;
 const INITIAL_SCHEMA_VERSION: u32 = 1;
 
+// Gas estimation constants used by the dry-run migration helper (Issue #89).
+// These model the dominant cost drivers of a schema migration: a fixed base
+// cost for opening the migration plus a per-record cost for converting each
+// stored record to the new schema layout.
+const MIGRATION_BASE_GAS: u64 = 50_000;
+const MIGRATION_GAS_PER_RECORD: u64 = 1_500;
+
+/// Read-only impact report produced by [`PaymentContract::dry_run_migrate_schema`].
+///
+/// The report lets admins estimate the cost and blast radius of a schema
+/// migration on mainnet or testnet without committing irreversible storage
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MigrationReport {
+    /// Schema version recorded before the migration.
+    pub current_version: u32,
+    /// Schema version the migration would move storage to.
+    pub target_version: u32,
+    /// Number of stored records that would be converted by the migration.
+    pub converted_records: u64,
+    /// Estimated gas, in instructions, the migration would consume.
+    pub gas_estimate: u64,
+    /// Always `true` for dry-run reports, distinguishing them from real runs.
+    pub dry_run: bool,
+}
+
 #[contractimpl]
 impl PaymentContract {
     /// Initializes the payment contract with a single admin and default multisig config.
@@ -1904,6 +1931,47 @@ impl PaymentContract {
             .instance()
             .set(&DataKey::Config(ConfigKey::SchemaVersion), &target_version);
         Ok(())
+    }
+
+    /// Simulates a schema migration and returns an impact report without
+    /// modifying any storage (Issue #89).
+    ///
+    /// The report includes the number of records that would be converted and a
+    /// gas estimate for the migration, letting admins rehearse the migration
+    /// against a live deployment before executing it for real.
+    ///
+    /// This function is read-only: calling it repeatedly with the same target
+    /// version returns an identical report and never advances the schema
+    /// version.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `target_version` - The schema version the migration would move storage to.
+    ///
+    /// # Returns
+    /// A `MigrationReport` describing the migration impact.
+    pub fn dry_run_migrate_schema(env: Env, target_version: u32) -> MigrationReport {
+        let current_version = Self::get_schema_version(env.clone());
+        let payment_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::Counter))
+            .unwrap_or(0);
+        let subscription_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Subscription(SubscriptionKey::Counter))
+            .unwrap_or(0);
+        let converted_records = payment_count.saturating_add(subscription_count);
+        let gas_estimate = MIGRATION_BASE_GAS
+            .saturating_add(MIGRATION_GAS_PER_RECORD.saturating_mul(converted_records));
+        MigrationReport {
+            current_version,
+            target_version,
+            converted_records,
+            gas_estimate,
+            dry_run: true,
+        }
     }
 
     /// Sets the verification level for a specific merchant.
@@ -11361,7 +11429,7 @@ impl PaymentContract {
         signature: BytesN<64>,
     ) -> Result<(), Error> {
         Self::require_not_paused(&env, "settle_channel")?;
-        
+
         let mut channel: PaymentChannel = env
             .storage()
             .instance()
@@ -11684,7 +11752,10 @@ impl PaymentContract {
                 .unwrap_or_else(|| Vec::new(&env));
             page.push_back(payment_id);
             env.storage().instance().set(
-                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(merchant.clone(), page_num)),
+                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
+                    merchant.clone(),
+                    page_num,
+                )),
                 &page,
             );
         }
@@ -11901,10 +11972,9 @@ impl PaymentContract {
 
         // Mark payment as Completed to prevent subsequent complete_payment calls
         payment.status = PaymentStatus::Completed;
-        env.storage().instance().set(
-            &DataKey::Payment(PaymentKey::Data(payment_id)),
-            &payment,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
 
         Ok(())
     }
