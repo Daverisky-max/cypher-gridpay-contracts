@@ -2212,8 +2212,11 @@ fn test_resolve_appeal_rejected_keeps_refund_rejected() {
     let appeal_id = client.file_appeal(&customer, &refund_id, &String::from_str(&env, "challenge"));
     client.resolve_appeal(&admin, &appeal_id, &false);
 
+    // Issue #64: an appeal that upholds the merchant's denial moves the
+    // refund to the distinct terminal `PermanentlyDenied` state, not the
+    // pre-appeal `Rejected` state.
     let refund = client.get_refund(&refund_id);
-    assert_eq!(refund.status, RefundStatus::Rejected);
+    assert_eq!(refund.status, RefundStatus::PermanentlyDenied);
 
     let resolved = client.get_appeal(&appeal_id);
     assert_eq!(resolved.resolved, true);

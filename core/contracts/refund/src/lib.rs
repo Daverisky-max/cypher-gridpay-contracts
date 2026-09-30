@@ -156,84 +156,6 @@ pub enum PolicyKey {
     AutoRefundTriggerCounter,
 }
 
-// Maximum number of a customer's refund references kept in "hot" instance
-// storage. Older entries are moved to persistent storage (archived) so a
-// customer's history can grow indefinitely without bloating the instance
-// storage footprint read/written on every contract invocation.
-const CUSTOMER_HISTORY_HOT_CAP: u64 = 50;
-
-#[derive(Clone, Debug, PartialEq)]
-#[contracttype]
-pub enum SystemKey {
-    PauseStateKey,
-    PauseHistoryEntry(u64),
-    PauseHistoryCount,
-    CircuitBreakerConfigKey,
-    CircuitBreakerStateKey,
-    WindowStart,
-    WindowRefundVolume,
-    WindowPaymentVolume,
-    FraudSignal(Address),
-    FraudConfig,
-    FlaggedAddressesIndex,
-    // Ordered list of flagged addresses: FlaggedAddress(n) -> Address, paired
-    // with the FlaggedAddressesIndex counter so get_flagged_addresses can
-    // enumerate every entry without iterating over all storage keys.
-    FlaggedAddress(u64),
-    RefundRejectedAt(u64),
-    Appeal(u64),
-    AppealCounter,
-    AppealByRefund(u64),
-    AppealByCustomer(Address, u64),
-    AppealByCustomerCount(Address),
-    // Notification hooks
-    NotificationHook(u64),
-    NotificationHookCounter,
-    HooksByEvent(RefundEventType, u64),
-    HooksByEventCount(RefundEventType),
-    SubscriberHooks(Address, u64),
-    SubscriberHookCount(Address),
-    // Platform fee deduction on refund processing
-    RefundFeeConfig,
-    AccumulatedRefundFees,
-    // Per-customer refund cooldown
-    CustomerRefundCooldown(Address),
-    RefundCooldownConfig,
-    SchemaVersion,
-    // Issue #382: cached reason-code analytics for a given [window_start, window_end]
-    // ledger-timestamp range, so repeated queries over the same window don't
-    // re-scan the full refund history.
-    AnalyticsCache(u64, u64),
-    // Tracks the distinct (window_start, window_end) pairs cached above, so a newly
-    // processed refund can invalidate only the windows it actually falls within.
-    AnalyticsCacheWindows,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[contracttype]
-pub enum EvidenceKey {
-    Evidence(u64, Address),
-    EvidenceIndex(u64, u64),
-    EvidenceCount(u64),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[contracttype]
-pub enum VoucherKey {
-    Voucher(u64),
-    VoucherCounter,
-    CustomerVoucher(Address, u64),
-    CustomerVoucherCount(Address),
-    RefundVoucherIssued(u64),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[contracttype]
-pub enum TokenKey {
-    SupportedToken(Address),
-    TokenCount,
-    TokenByIndex(u64),
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -243,6 +165,11 @@ pub enum RefundStatus {
     Rejected,
     Processed,
     PendingAppeal,
+    // Issue #64: distinct terminal state for a refund whose denial was
+    // confirmed on appeal (the appeal was "upheld" in favor of the
+    // merchant), as opposed to `Rejected`, which is the initial merchant
+    // denial before any appeal has been decided.
+    PermanentlyDenied,
 }
 
 // Issue #397: canonical reason codes, enforced by the type system on Refund and
@@ -2253,6 +2180,18 @@ impl RefundContract {
     /// Returns `Unauthorized` if the caller is not the admin.
     /// Returns `AlreadyProcessed` if the appeal is already resolved.
     /// Returns `RefundNotFound` if the appeal or refund does not exist.
+    /// Resolve a pending refund appeal.
+    ///
+    /// Issue #64: state-transition semantics are unambiguous:
+    /// - `uphold = true` means the appeal is upheld in favor of the
+    ///   customer (the original merchant denial is *overturned*): the
+    ///   underlying `Refund` transitions to `RefundStatus::Approved` and is
+    ///   processed.
+    /// - `uphold = false` means the appeal is denied and the merchant's
+    ///   original denial is *upheld*: the underlying `Refund` transitions
+    ///   to the terminal `RefundStatus::PermanentlyDenied` state rather than
+    ///   the pre-appeal `Rejected` state, so callers can distinguish "denied,
+    ///   appeal pending/available" from "denied, appeal exhausted".
     pub fn resolve_appeal(
         env: Env,
         admin: Address,
@@ -2316,12 +2255,16 @@ impl RefundContract {
             // now — no need to wait out the rest of the appeal window.
             if refund.status == RefundStatus::PendingAppeal {
                 Self::remove_from_status_index(&env, RefundStatus::PendingAppeal, refund.id)?;
-                refund.status = RefundStatus::Rejected;
+                // Issue #64: the appeal was upheld against the customer, so
+                // the merchant's denial is final — move to the distinct
+                // `PermanentlyDenied` terminal state rather than reusing the
+                // pre-appeal `Rejected` status.
+                refund.status = RefundStatus::PermanentlyDenied;
                 refund.rejected_at = Some(env.ledger().timestamp());
                 env.storage()
                     .instance()
                     .set(&DataKey::Refund(refund.id), &refund);
-                Self::add_to_status_index(&env, RefundStatus::Rejected, refund.id);
+                Self::add_to_status_index(&env, RefundStatus::PermanentlyDenied, refund.id);
                 Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
             }
         }
@@ -4908,6 +4851,9 @@ impl RefundContract {
                         RefundStatus::PendingAppeal => {
                             pending_count += 1;
                             pending_amount += refund.amount;
+                        }
+                        RefundStatus::PermanentlyDenied => {
+                            total_rejected += 1;
                         }
                     }
                 }
