@@ -2,7 +2,6 @@
 
 use crate::*;
 use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
-use crate::*;
 
 fn setup() -> (Env, EscrowContractClient<'static>, Address) {
     let env = Env::default();
@@ -32,7 +31,7 @@ fn test_threshold_change_via_multisig() {
     // With threshold=1 (default), one approval from proposer is enough to execute.
     let proposal_id = client.propose_action(
         &admin,
-        &ActionType::UpdateThreshold { new_threshold: 2u32 },
+        &ActionType::UpdateThreshold(2u32),
         &admin2,
         &Bytes::new(&env),
     );
@@ -48,13 +47,13 @@ fn test_threshold_zero_rejected() {
 
     let proposal_id = client.propose_action(
         &admin,
-        &ActionType::UpdateThreshold { new_threshold: 0u32 },
+        &ActionType::UpdateThreshold(0u32),
         &admin,
         &Bytes::new(&env),
     );
 
     let result = client.try_execute_action(&proposal_id);
-    assert_eq!(result, Err(Ok(Error::InvalidThreshold)));
+    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidThreshold))));
 }
 
 #[test]
@@ -64,11 +63,60 @@ fn test_threshold_exceeds_admin_count_rejected() {
     // Only 1 admin exists; requesting threshold=2 should fail.
     let proposal_id = client.propose_action(
         &admin,
-        &ActionType::UpdateThreshold { new_threshold: 2u32 },
+        &ActionType::UpdateThreshold(2u32),
         &admin,
         &Bytes::new(&env),
     );
 
     let result = client.try_execute_action(&proposal_id);
-    assert_eq!(result, Err(Ok(Error::InsufficientAdmins)));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Basic(BasicError::InsufficientAdmins)))
+    );
+}
+
+#[test]
+fn test_threshold_increase_invalidates_pending_proposal_approvals() {
+    let (env, client, admin) = setup();
+
+    let admin2 = Address::generate(&env);
+    client.add_admin(&admin, &admin2);
+
+    // A pending action that collected its approvals under the old threshold.
+    let pending = client.propose_action(
+        &admin,
+        &ActionType::UpdateThreshold(1u32),
+        &admin,
+        &Bytes::new(&env),
+    );
+
+    // Raise the required signatures to 2 through a separate proposal.
+    let raise = client.propose_action(
+        &admin,
+        &ActionType::UpdateThreshold(2u32),
+        &admin,
+        &Bytes::new(&env),
+    );
+    client.execute_action(&raise);
+    assert_eq!(client.get_multisig_config().required_signatures, 2);
+
+    // The stale proposal cannot ride on approvals gathered under the old rule.
+    let stale = client.try_execute_action(&pending);
+    assert_eq!(
+        stale,
+        Err(Ok(Error::Escrow(EscrowError::InvalidStatus)))
+    );
+
+    // Re-approving restarts collection under the new threshold: one admin is
+    // still not enough, two are.
+    client.approve_action(&admin, &pending);
+    let still_short = client.try_execute_action(&pending);
+    assert_eq!(
+        still_short,
+        Err(Ok(Error::Escrow(EscrowError::InvalidStatus)))
+    );
+
+    client.approve_action(&admin2, &pending);
+    client.execute_action(&pending);
+    assert_eq!(client.get_multisig_config().required_signatures, 1);
 }
