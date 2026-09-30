@@ -170,3 +170,97 @@ fn test_multi_party_escrow_set_participant_weight() {
     let release_res = client.try_release_multi_party_escrow(&escrow_id);
     assert!(release_res.is_ok());
 }
+
+/// Regression test for issue #27: odd-number voter weight aggregation must not
+/// lose a >50% majority to integer truncation during quorum calculation.
+///
+/// Three voters with equal shares (3333/3333/3334 bps) are used. Two of the
+/// three approve, giving an approved weight of 6666 bps against a 6666 bps
+/// threshold (2/3 majority). With naive truncation the aggregation could fall
+/// short; the precision-scaled quorum calculation must round in favor of
+/// quorum attainment so the release succeeds.
+#[test]
+fn test_multi_party_escrow_odd_voter_weight_aggregation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let token_client = token::StellarAssetClient::new(&env, &token_id);
+    let token_user_client = token::Client::new(&env, &token_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let customer = Address::generate(&env);
+    token_client.mint(&customer, &10000);
+
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    let p3 = Address::generate(&env);
+
+    let mut participants = Vec::new(&env);
+    // Odd-number voter set: shares do not divide evenly into 10000 bps.
+    participants.push_back(Participant {
+        address: p1.clone(),
+        role: ParticipantRole::Merchant,
+        share_bps: 3333,
+        weight_bps: 0,
+        approved: false,
+        approved_at: None,
+    });
+    participants.push_back(Participant {
+        address: p2.clone(),
+        role: ParticipantRole::ServiceProvider,
+        share_bps: 3333,
+        weight_bps: 0,
+        approved: false,
+        approved_at: None,
+    });
+    participants.push_back(Participant {
+        address: p3.clone(),
+        role: ParticipantRole::Arbitrator,
+        share_bps: 3334,
+        weight_bps: 0,
+        approved: false,
+        approved_at: None,
+    });
+
+    let release_timestamp = 1000_u64;
+    env.ledger().set_timestamp(500);
+
+    let escrow_id = client.create_multi_party_escrow(
+        &customer,
+        &participants,
+        &10000,
+        &token_id,
+        &release_timestamp,
+    );
+
+    // Two of three voters approve: 3333 + 3333 = 6666 bps.
+    client.approve_release(&p1, &escrow_id);
+    client.approve_release(&p2, &escrow_id);
+    let (approved_wt, _) = client.get_approval_weight(&escrow_id);
+    assert_eq!(approved_wt, 6666);
+
+    // Set the quorum threshold to exactly the aggregated weight (2/3 majority).
+    client.update_approval_threshold_bps(&admin, &escrow_id, &6666);
+    let (_, threshold_bps) = client.get_approval_weight(&escrow_id);
+    assert_eq!(threshold_bps, 6666);
+
+    // The >50% majority must be honored: release succeeds without truncation loss.
+    env.ledger().set_timestamp(1001);
+    let release_res = client.try_release_multi_party_escrow(&escrow_id);
+    assert!(release_res.is_ok());
+
+    let escrow = client.get_multi_party_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+    assert_eq!(token_user_client.balance(&p1), 3333);
+    assert_eq!(token_user_client.balance(&p2), 3333);
+    assert_eq!(token_user_client.balance(&p3), 3334);
+}
