@@ -1,5 +1,17 @@
 # Glossary
 
+## Admin Orchestrator
+
+The top-level coordinator contract located in `orchestrator/contracts/admin` that manages cross-contract operations, emergency pauses, dynamic address updates, and access control across the Payment, Escrow, and Refund contracts.
+
+## Arbitrator
+
+A registered, trusted entity or account capable of resolving disputed escrows and appeals within the refund contract. Arbitrators maintain on-chain reputation scores and can be subject to stake slashing for fraudulent or non-responsive rulings.
+
+## Circuit Breaker
+
+An automated safety mechanism that halts contract state changes or limits transaction volume when certain volatility or aggregate refund thresholds are breached within a rolling window.
+
 ## Clawback
 
 An admin-controlled emergency fund-recovery mechanism for the escrow contract. When normal resolution paths (release, dispute, refund) are unavailable — for example, due to fraud, a compliance hold, or an irrecoverable deadlock — a multisig admin can forcibly recover the full escrow balance and transfer it to their own address.

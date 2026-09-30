@@ -1,6 +1,6 @@
-# Deploying Smart Contracts to Stellar Testnet
+# Deploying Cypher GridPay Smart Contracts
 
-This guide walks you through building, setting up identities, funding accounts, and deploying all four Cypher GridPay smart contracts (`admin`, `payment`, `escrow`, and `refund`) to the Stellar Testnet using the **Stellar CLI**.
+This guide walks you through building, setting up identities, funding accounts, and deploying all four Cypher GridPay smart contracts across the `core` and `orchestrator` workspaces to Stellar Testnet (or local quickstart) using the **Stellar CLI**.
 
 ---
 
@@ -37,7 +37,17 @@ Soroban test environment (Issue #81).
 
 ## Prerequisites
 
-Before beginning, ensure you have the following installed:
+```
+Step 1: Payment Contract   (core)
+Step 2: Escrow Contract    (core)
+Step 3: Refund Contract    (core)
+Step 4: Admin Orchestrator (orchestrator)
+Step 5: Initialize Admin Orchestrator with Step 1-3 addresses
+```
+
+---
+
+## Prerequisites
 
 1. **Rust & `wasm32` Target**:
    ```bash
