@@ -96,6 +96,39 @@ Recommended migration path:
 2. For unknown/legacy flows, pass `Other` first and backfill specific codes in your upstream app logic.
 3. If upgrading a deployed instance with existing data, plan a storage/data migration for historical refunds before reading them as the new `Refund` shape.
 
+## 🧩 Client SDK (TypeScript)
+
+Type-safe client bindings for all four contracts are generated from the
+compiled WASM and published as `@cypher-gridpay/contracts-sdk`:
+
+```bash
+# Generate bindings (builds the contracts first)
+./scripts/generate-ts-bindings.sh
+
+# Build and pack the package
+cd sdk/typescript
+npm install
+npm run build
+npm pack          # -> cypher-gridpay-contracts-sdk-<version>.tgz
+```
+
+```ts
+import { PaymentsClient } from "@cypher-gridpay/contracts-sdk";
+
+const client = new PaymentsClient({
+  contractId: paymentContractId,
+  publicKey: viewerPublicKey,
+  server,
+  networkPassphrase: Networks.TESTNET,
+});
+
+const payment = await client.getPayment(paymentId);
+```
+
+Pass no `source` for a read-only client. Re-run the generator after any contract
+interface change — the generated `.d.ts` turns a breaking change into a compile
+error in your app. See [sdk/typescript/README.md](sdk/typescript/README.md).
+
 ## 🔄 Development Workflow
 
 1. Fork the repo
@@ -108,6 +141,8 @@ Recommended migration path:
 
 ## 🔗 Links
 
+- [TypeScript SDK](sdk/typescript/README.md)
+- [Python SDK](docs/PYTHON_SDK.md)
 - [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
 - Telegram: https://t.me/+afM9uh7GGtVkYmZk
 - [API Repository](https://github.com/cypher-gridpay/cypher-gridpay-api)
@@ -120,11 +155,11 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Handsoff notes
 
-<!-- handsoff-issue-22 -->
-- #22: payment: Validate token contract address against whitelist in create_payment
+<!-- handsoff-issue-10 -->
+- #10: payment: Implement dynamic risk fee surcharge updates based on merchant chargeback history
 
-<!-- handsoff-issue-25 -->
-- #25: payment: Standardize and emit Soroban contract events for all payment lifecycle events
+<!-- handsoff-issue-11 -->
+- #11: payment: Add nonce and replay protection to multisig action proposal execution
 
-<!-- handsoff-issue-26 -->
-- #26: escrow: Modularize monolithic 11,600-line lib.rs into domain submodules
+<!-- handsoff-issue-13 -->
+- #13: payment: Add expiration and overflow checks to customer loyalty points system
