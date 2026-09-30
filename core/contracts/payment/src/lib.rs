@@ -114,6 +114,7 @@ pub enum DataKey {
     State(StateDataKey),
 }
 
+/// Protocol-level administrative and execution errors for PaymentContract.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
@@ -177,6 +178,7 @@ pub enum BasicError {
     SchemaMigrationFailed = 127,
 }
 
+/// Errors relating to payment lifecycle, settlement, and scheduling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
@@ -233,44 +235,73 @@ pub enum PaymentError {
     TokenNotAllowed = 224,
 }
 
+/// Errors relating to recurring subscription plans, dunning cycles, and billing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum SubscriptionError {
+    /// Subscription record was not found in storage. Resolution: verify subscription ID before executing operations.
     NotFound = 300,
-    NotActive = 301,
+    /// Subscription is not active (paused, cancelled, or expired). Resolution: resume or renew subscription first.
     PaymentNotDue = 302,
+    /// Subscription charge attempted before the scheduled billing cycle date. Resolution: wait until next billing timestamp.
+    NotActive = 301,
+    /// Maximum permitted failed payment retry attempts reached. Resolution: cancel subscription or update payment method.
     MaxRetriesExceeded = 303,
+    /// Subscription has reached its end timestamp or termination condition. Resolution: create a new subscription if desired.
     Ended = 304,
+    /// Dunning record for tracking failed payment retries not found. Resolution: initialize dunning process on failed payment.
     DunningNotFound = 305,
+    /// Operation requires active dunning status, but subscription is healthy. Resolution: verify subscription dunning status.
     NotInDunning = 306,
+    /// Next automated retry attempt is not yet due. Resolution: wait until retry_interval has elapsed.
     RetryNotDue = 307,
+    /// Dunning grace period expired without successful payment recovery. Resolution: cancel subscription and notify customer.
     GracePeriodExpired = 308,
+    /// Payment retry attempted sooner than backoff interval allows. Resolution: obey retry backoff interval.
     RetryTooEarly = 309,
+    /// Metered billing configuration record not found. Resolution: initialize metered subscription parameters first.
     MeteredNotFound = 310,
+    /// Invoiced usage or charge would breach configured billing cap. Resolution: increase billing cap or throttle usage.
     BillingCapExceeded = 311,
+    /// Subscription group ID not found in storage. Resolution: register subscription group before adding members.
     GroupNotFound = 312,
+    /// Customer is already a member of this subscription group. Resolution: cannot add duplicate member to group.
     AlreadyInGroup = 313,
+    /// Subscription group has reached its maximum permitted member capacity. Resolution: upgrade group tier or remove members.
     GroupSizeLimitExceeded = 314,
+    /// Free trial period has elapsed and requires standard billing activation. Resolution: convert to paid subscription plan.
     TrialExpired = 315,
+    /// Requested trial duration exceeds protocol maximum trial period. Resolution: configure trial duration within allowed bounds.
     MaxTrialDurationExceeded = 316,
+    /// The merchant for this subscription is currently paused. Resolution: unpause merchant before charging subscribers.
     MerchantPaused = 317,
+    /// Metered subscription units consumed exceed period usage cap. Resolution: reset billing period or increase unit cap.
     UsageCapExceeded = 318,
 }
 
+/// Errors relating to multi-sig administrative proposals and voting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum ProposalError {
+    /// Proposal ID was not found in storage. Resolution: verify proposal ID or create a new proposal.
     NotFound = 400,
+    /// Proposal has passed its expiration deadline (proposal_ttl). Resolution: re-propose with a fresh proposal window.
     Expired = 401,
+    /// Proposal has already been executed on-chain. Resolution: no-op; proposal action is already completed.
     AlreadyExecuted = 402,
+    /// Required approval threshold not reached among admins. Resolution: collect remaining required admin signatures.
     ThresholdNotMet = 403,
+    /// Action amount or sensitivity requires multi-sig proposal workflow. Resolution: submit proposal via propose_admin_action().
     RequiresMultiSig = 404,
+    /// Total approvals collected is less than required multi-sig threshold. Resolution: wait for remaining admin approvals.
     InsufficientApprovals = 405,
+    /// Proposal is no longer valid due to ledger timestamp exceeding expires_at. Resolution: submit new proposal.
     ProposalExpired = 406,
 }
 
+/// Errors relating to specialized features (escrow bridging, payment channels, split payouts, loyalty, limits).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]

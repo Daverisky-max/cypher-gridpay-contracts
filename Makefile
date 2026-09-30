@@ -32,3 +32,5 @@ doc:
 clean:
 	$(MAKE) -C core clean
 	$(MAKE) -C orchestrator clean
+
+.PHONY: default all test build check-size fmt clippy check doc clean
