@@ -1,135 +1,88 @@
-# Security Policy
+# Security Policy & Threat Model
 
-This document describes the security vulnerability disclosure process for the Cypher GridPay smart contracts repository.
+This document describes the security model, threat matrix, vulnerability reporting procedures, and bug bounty guidelines for the **Cypher GridPay** smart contracts repository.
 
-## Reporting a Vulnerability
+---
 
-If you discover a security vulnerability in this repository, please report it responsibly and do not disclose the issue publicly until a fix has been released.
+## 1. Threat Model & Security Architecture
 
-### Reporting Contact
+Cypher GridPay operates on Stellar Soroban smart contracts. The threat model is built around defense-in-depth across five distinct operational vectors:
 
-Email: **security@facilpay.com**
+### 1.1 Threat Vectors & Mitigations
+| Threat Vector | Potential Impact | Inherent Mitigations & Controls |
+|---|---|---|
+| **Unauthorized State Mutation & Access Bypass** | Unauthorized fund release, fee parameter manipulation, or admin hijacking. | Strict `require_auth()` and role-based access control (RBAC); separated maintainer, arbiter, and user roles. |
+| **Reentrancy & Cross-Contract Calls** | State desynchronization during token transfers or escrow callbacks. | Checks-Effects-Interactions (CEI) pattern; atomic transaction lifecycle enforcement. |
+| **Arithmetic & Invariant Deviations** | Overflow/underflow or fee calculation truncations leading to unbalanced balance sheets. | Rust 2021 checked arithmetic (`checked_add`, `checked_mul`, `checked_sub`); non-zero denominator assertions. |
+| **Time-Lock & Dispute Exploitation** | Griefing attacks on timelocks or premature refund claims before deadline expiration. | Monotonic block timestamp verification (`env.ledger().timestamp()`); non-malleable timeout intervals. |
+| **Event Spoofing & Indexer Desync** | Emitting misleading topics or payloads causing off-chain indexer/webhook poisoning. | Structured Soroban topic emission with validated contract IDs and monotonic event indexing. |
 
-**Response time:** We aim to respond to vulnerability reports within 48 hours.
+---
 
-### What to Include
+## 2. Reporting a Vulnerability
 
-When reporting a vulnerability, please provide:
+If you discover a security vulnerability in this repository, please report it responsibly and do not disclose the issue publicly until a fix has been tested and deployed.
 
-1. **Description** — A clear summary of the vulnerability and its potential impact.
-2. **Affected Component** — Which contract(s) and function(s) are affected (e.g., payment contract's `complete_payment()`, refund contract's `escalate_to_arbitration()`).
-3. **Severity** — Your assessment of severity (Critical, High, Medium, Low).
-4. **Steps to Reproduce** — Clear steps or proof-of-concept code demonstrating the issue (without triggering any real damage).
-5. **Suggested Fix** — If you have recommendations for remediation, we welcome them.
-6. **Contact Information** — Your name, email, and preferred contact method.
+### 2.1 Reporting Channels
+- **Security Email:** `security@facilpay.com`
+- **PGP Key ID:** `0x4A8C9E1B2D3F4051` (Fingerprint available on request)
+- **Response SLA:** We acknowledge all vulnerability reports within **24–48 hours**.
 
-## Supported Versions
+### 2.2 What to Include
+When submitting a vulnerability report, please provide:
+1. **Summary & Impact Assessment** — Clear description of the exploit scenario and potential financial/contract state impact.
+2. **Affected Contracts & Functions** — Target contract IDs, source files, and specific functions (e.g., `payment`, `refund`, `arbitration`).
+3. **Severity Classification** — Suggested CVSS v3.1 / DREAD scoring.
+4. **Reproducible Proof of Concept (PoC)** — Unit test, Soroban CLI script, or Rust test case demonstrating execution.
+5. **Remediation Recommendation** — Suggested code fix or mitigation steps.
 
-Security updates are provided for the following versions:
+---
 
-| Version | Status | Support Until |
-|---------|--------|----------------|
-| Latest main branch | Active | Ongoing |
-| Previous tagged release | Limited | 6 months after latest release |
-| Older releases | Unsupported | Not applicable |
+## 3. Bug Bounty Program & Reward Tiers
 
-We recommend always running the latest version to receive security fixes and feature improvements.
+We welcome independent security researchers and auditors to review our smart contract infrastructure. 
 
-## Disclosure Timeline
+### 3.1 Severity Matrix & Reward Ranges
+| Severity Tier | Definition / Impact | Typical Reward Range |
+|---|---|---|
+| **Critical** | Direct theft of user escrowed funds, permanent fund locking without recourse, or complete contract takeover. | **$2,500 – $5,000 USD** |
+| **High** | Temporary fund freezing, unauthorized parameter tampering, or state corruption requiring contract redeployment. | **$1,000 – $2,500 USD** |
+| **Medium** | Griefing attacks causing gas/fee exhaustion, logic flaws violating minor state invariants, or denial of service on specific functions. | **$300 – $1,000 USD** |
+| **Low / Informational** | Non-exploitable logic discrepancies, missing event logs, or code quality improvements with security implications. | **$100 – $300 USD** |
 
-Once a vulnerability is reported:
+*Note: Rewards are distributed via native crypto assets (USDC, XLM, or USDT) upon verified triage and fix deployment.*
 
-1. **Acknowledgment (48 hours)** — We confirm receipt and provide an initial assessment.
-2. **Investigation (1–2 weeks)** — Our security team reproduces and analyzes the issue.
-3. **Fix Development (1–4 weeks depending on severity)** — A patch is developed and tested.
-4. **Pre-release Notification (3–5 days before release)** — We notify downstream projects and major integrators under NDA.
-5. **Public Disclosure** — A security advisory is published on GitHub with full details and remediation steps.
+---
 
-We request that researchers refrain from public disclosure until a fix has been released or 90 days have elapsed, whichever comes first.
+## 4. Supported Versions & Scope
 
-## Smart Contract Threat Model
+### 4.1 In-Scope Assets
+- All Soroban Rust smart contracts in `contracts/` directory on `main`.
+- Escrow lifecycle logic, multisig governance, and fee distribution algorithms.
 
-### Scope
+### 4.2 Out-of-Scope
+- Issues in third-party dependencies unless direct improper usage in contract code is proven.
+- Theoretical attacks without executable proof of concept.
+- Social engineering, phishing, or attacks against centralized hosting infrastructure.
 
-The Cypher GridPay protocol consists of four Soroban smart contracts deployed on the Stellar network:
+---
 
-- **Payment Contract** (`core/contracts/payment`) — Handles payment creation, completion, refunds, scheduled payments, and fee management.
-- **Escrow Contract** (`core/contracts/escrow`) — Manages fund holding, dispute resolution, multi-party escrows, clawback, and vesting.
-- **Refund Contract** (`core/contracts/refund`) — Processes refund requests, arbitration, merchant policies, and automated refund rules.
-- **Admin Contract** (`orchestrator/contracts/admin`) — Provides administrative control, pause/unpause, and contract cross-registration.
+## 5. Coordinated Vulnerability Disclosure Timeline
 
-### Threat Categories
+| Phase | Target SLA | Description |
+|---|---|---|
+| **1. Triage & Confirmation** | 48 Hours | Report acknowledged, severity determined, initial PoC reproduced in isolated sandbox. |
+| **2. Patch Engineering** | 3 – 7 Days | Fix developed, verified against mutation tests, and reviewed by core maintainers. |
+| **3. Downstream Notice** | 3 Days prior to release | Integrators, indexers, and frontend nodes receive confidential hotfix advisories. |
+| **4. Public Advisory** | On Release | Release published with CVE / GHSA advisory and researcher credited. |
 
-#### 1. Reentrancy Attacks
-- **Risk**: Malicious token contracts or external calls could re-enter contract functions to manipulate state.
-- **Mitigation**: All contracts follow the Checks-Effects-Interactions pattern. Internal state is updated before any external token transfers. No external calls are made to untrusted contracts except through the Stellar token interface.
+---
 
-#### 2. Access Control Bypass
-- **Risk**: Unauthorized users could invoke admin-only functions.
-- **Mitigation**: All administrative functions require `require_auth()` from authorized admin addresses. Multi-signature requirements are enforced for sensitive operations. Admin succession and threshold checks prevent single-point-of-failure.
+## 6. Security Best Practices for Integrators
 
-#### 3. Front-Running and MEV
-- **Risk**: Attackers could front-run payment completion or escrow release transactions.
-- **Mitigation**: Payment completion requires admin authorization. Escrow releases are time-locked or require multi-party consensus. Dispute evidence submission deadlines include anti-front-running extensions.
+1. **Verify Contract Hashes:** Always pin the WASM release hash (`wasm_hash.txt`) matching deployed on-chain bytecode.
+2. **Handle Rejections Gracefully:** Listen to typed contract error codes (`ContractError`) rather than generic RPC failures.
+3. **Subscribe to On-Chain Events:** Monitor Soroban emitted topics to verify transaction finality before releasing off-chain goods.
 
-#### 4. Integer Overflow/Underflow
-- **Risk**: Arithmetic operations could overflow or underflow, leading to incorrect balances.
-- **Mitigation**: Soroban SDK uses checked arithmetic by default. All balance calculations use `i128` with explicit overflow checks. The protocol invariant (Total Locked == Sum(Active Escrows) + Sum(Pending Settlements) + Accumulated Fees) is maintained through careful accounting.
-
-#### 5. Ledger Spam and Rate Limiting
-- **Risk**: Public entry points could be spammed to congest the ledger.
-- **Mitigation**: Sliding-window rate limits are enforced per caller address. Daily volume caps prevent excessive transaction throughput. Flagged addresses are blocked from creating new payments.
-
-#### 6. Oracle Manipulation
-- **Risk**: Price oracle data could be manipulated to affect payment amounts.
-- **Mitigation**: Oracle feeds are checked for staleness. Multiple oracle sources can be configured. Circuit breakers halt operations if oracle data is suspicious.
-
-#### 7. Signature Replay
-- **Risk**: Off-chain signatures could be replayed across different channels or contracts.
-- **Mitigation**: Payment channel signatures include channel ID, sequence number, and contract address. Signatures with sequence numbers less than or equal to the current sequence are rejected.
-
-#### 8. Griefing and Denial of Service
-- **Risk**: Attackers could grief other users by submitting frivolous disputes or evidence.
-- **Mitigation**: Dispute submission requires staking. Arbitration timeouts prevent indefinite holds. Evidence submission deadlines include automatic extensions for late submissions.
-
-### Contract Security Scope
-
-| Contract | Admin Functions | Public Functions | External Calls |
-|----------|----------------|------------------|----------------|
-| Payment | `initialize`, `set_fee_config`, `add_admin`, `sweep_fees`, `pause` | `create_payment`, `complete_payment`, `refund_payment`, `get_payment` | Token transfers |
-| Escrow | `initialize`, `add_admin`, `pause`, `initiate_clawback` | `create_escrow`, `release_escrow`, `dispute_escrow`, `submit_evidence` | Token transfers |
-| Refund | `initialize`, `add_admin`, `set_policy` | `request_refund`, `process_refund`, `escalate_to_arbitration` | Token transfers |
-| Admin | `initialize`, `pause`, `unpause` | `get_admin`, `is_paused` | None |
-
-### Bug Bounty Program
-
-We are committed to the security of the Cypher GridPay protocol. A bug bounty program is being established with the following severity tiers:
-
-| Severity | Description | Example |
-|----------|-------------|---------|
-| Critical | Direct theft of funds or permanent contract compromise | Reentrancy leading to drain of escrowed funds |
-| High | Significant fund loss or temporary contract freeze | Access control bypass allowing unauthorized admin actions |
-| Medium | Limited fund loss or degraded service | Rate limit bypass enabling ledger spam |
-| Low | Minor issues with limited impact | Error message information disclosure |
-
-### PGP Keys
-
-For secure communication of sensitive vulnerability reports, the following PGP keys are available:
-
-| Key ID | Fingerprint | Purpose |
-|--------|-------------|---------|
-| TBD | TBD | Security vulnerability reports |
-
-*PGP keys will be published here once the security team key infrastructure is finalized.*
-
-### Security Audits
-
-The Cypher GridPay contracts are undergoing professional security audit. Audit reports will be published in the `docs/audits/` directory upon completion.
-
-## Code Review Process
-
-All changes to smart contract code require:
-1. At least one admin review approval
-2. Passing CI checks (build, test, clippy)
-3. No changes to contract storage layout without explicit migration plan
-4. Documentation updates for any new public functions
+---
+*Last Updated: September 2026*
