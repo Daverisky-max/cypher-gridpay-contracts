@@ -2,26 +2,2009 @@
 // Soroban's 50-variant XDR limit. Each sub-enum must have <= 50 variants.
 #![no_std]
 
-// Module declarations
-pub mod channels;
-pub mod errors;
-pub mod events;
-pub mod splits;
-pub mod storage;
-pub mod subscriptions;
-pub mod types;
-
-// Re-exports for public API
-pub use errors::{BasicError, Error, FeatureError, PaymentError, ProposalError, SubscriptionError, TestError};
-pub use events::*;
-pub use storage::{ConfigKey, CustomerDataKey, DataKey, FeatureKey, MerchantDataKey, PaymentKey, StateDataKey, SubscriptionKey, MAX_MEMO_VERSIONS};
-pub use types::*;
-
+#[cfg(test)]
+extern crate std;
 use escrow::EscrowContractClient;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, token, xdr::ToXdr, Address,
     Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
 };
+
+pub mod storage;
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum Currency {
+    XLM,
+    USDC,
+    USDT,
+    BTC,
+    ETH,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum PayoutFrequency {
+    Immediate,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum ConfigKey {
+    Admin,
+    MultiSigConfig,
+    FeeConfig,
+    RateLimitConfig,
+    DunningConfig,
+    LoyaltyConfig,
+    RiskFeeConfig,
+    FinalityConfig,
+    FeeRebateConfig,
+    TierThresholds,
+    LargePaymentThreshold,
+    GlobalMerchantCount,
+    PauseStateKey,
+    MinSplitAmount,
+    SchemaVersion,
+    AllowedTokens,
+    MaxForwardDepth,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum PaymentKey {
+    Data(u64),
+    Counter,
+    Metadata(u64),
+    Memo(u64),
+    MemoVersion(u64),
+    Tag(u64),
+    Invoice(u64),
+    InvoiceCounter,
+    InvoicePaymentId(u64),
+    PartialPaymentCounter(u64),
+    OutstandingBalance(u64),
+    PendingSettlement(u64),
+    AccumulatedFees,
+    LargePaymentCounter,
+    Discount(u64),
+}
+
+pub const MAX_MEMO_VERSIONS: u32 = 10;
+
+#[derive(Clone)]
+#[contracttype]
+pub enum SubscriptionKey {
+    Data(u64),
+    Counter,
+    Metered(u64),
+    MeteredCounter,
+    Group(u64),
+    GroupCounter,
+    GroupMembership(u64),
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum FeatureKey {
+    PaymentAnalytics,
+    PlatformAnalyticsDaily(u64),
+    PaymentForwardConfig(Address),
+    OracleRateConfig(Currency),
+    ConversionRate(Currency),
+    MerchantRateLimit(Address),
+    CustomerLoyaltyBalance(Address),
+    CustomerSpendLimit(Address),
+    PaymentChannel(u64),
+    PaymentChannelCounter,
+    SplitConfig(u64),
+    SweepRecipient,
+    SweepCounter,
+    SweepHistory(u64),
+    RouteOptions(Address, Address),
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey {
+    Config(ConfigKey),
+    Payment(PaymentKey),
+    Subscription(SubscriptionKey),
+    Feature(FeatureKey),
+    Customer(CustomerDataKey),
+    Merchant(MerchantDataKey),
+    State(StateDataKey),
+}
+
+/// Protocol-level administrative and execution errors for PaymentContract.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+#[contracterror]
+pub enum BasicError {
+    /// Admin authentication required. The caller is not a registered admin.
+    Unauthorized = 100,
+    /// Payment metadata exceeds the maximum allowed size.
+    MetadataTooLarge = 101,
+    /// Payment notes exceed the maximum allowed size.
+    NotesTooLarge = 102,
+    /// Unsupported currency specified. Use XLM, USDC, USDT, BTC, or ETH.
+    InvalidCurrency = 103,
+    /// Batch size is invalid. Use a batch size between 1 and 100.
+    InvalidBatchSize = 104,
+    /// Some payments in the batch failed. Check individual payment statuses.
+    BatchPartialFailure = 105,
+    /// Rate limit exceeded for this address. Wait for the rate limit window to reset.
+    RateLimitExceeded = 106,
+    /// Daily volume limit exceeded. Wait for the next day or contact admin.
+    DailyVolumeExceeded = 107,
+    /// Address has been flagged for suspicious activity. Contact support to resolve.
+    AddressFlagged = 108,
+    /// Address is already flagged. No action needed.
+    AddressAlreadyFlagged = 109,
+    /// Payment amount exceeds the maximum allowed. Reduce payment amount.
+    AmountExceedsLimit = 110,
+    /// Multi-signature not initialized. Initialize multi-sig configuration first.
+    MultiSigNotInitialized = 111,
+    /// Not enough admin signatures. Collect the required number of admin signatures.
+    InsufficientAdmins = 112,
+    /// Caller is not an admin. Use an admin account.
+    NotAnAdmin = 113,
+    /// Admin has already approved this proposal. No action needed.
+    AlreadyApproved = 114,
+    /// Price oracle call failed. Retry or check oracle configuration.
+    OracleCallFailed = 115,
+    /// Contract is paused. Wait for the contract to be unpaused.
+    ContractPaused = 116,
+    /// This function is paused. Use an alternative function.
+    FunctionPaused = 117,
+    /// Tier threshold configuration is invalid. Fix tier threshold values.
+    InvalidTierThresholds = 118,
+    /// Oracle price feed is stale. Wait for the next oracle update.
+    OracleFeedStale = 119,
+    /// Oracle is not configured. Configure the oracle first.
+    OracleNotConfigured = 120,
+    /// Payment amount is invalid. Use a positive amount.
+    InvalidAmount = 121,
+    /// Verification level not found. Use a valid verification level.
+    VerificationLevelNotFound = 122,
+    /// Tier limits are not configured. Configure tier limits first.
+    TierLimitsNotConfigured = 123,
+    /// Invalid interval specified. Use a valid interval.
+    InvalidInterval = 124,
+    /// Invalid basis points value. Use bps between 0 and 10000.
+    InvalidBps = 125,
+    /// Schema is already at the target version. No migration needed.
+    SchemaAlreadyAtTarget = 126,
+    // Issue #88: a data migration step failed, so the schema version must
+    // not be bumped (the whole transaction is reverted).
+    SchemaMigrationFailed = 127,
+}
+
+/// Errors relating to payment lifecycle, settlement, and scheduling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+#[contracterror]
+pub enum PaymentError {
+    /// Payment not found. Verify the payment ID.
+    NotFound = 200,
+    /// Payment is not in a valid status for this operation.
+    InvalidStatus = 201,
+    /// Payment has already been processed. No action needed.
+    AlreadyProcessed = 202,
+    /// Payment has expired. Create a new payment.
+    Expired = 203,
+    /// Payment has not expired yet. Wait for expiration.
+    NotExpired = 204,
+    /// Payment has no expiration set.
+    NoExpiration = 205,
+    /// Token transfer failed. Check token balance and allowances.
+    TransferFailed = 206,
+    /// Refund amount exceeds the original payment amount.
+    RefundExceedsPayment = 207,
+    /// Payment is not yet due. Wait for the scheduled time.
+    NotYetDue = 208,
+    /// Scheduled payment has been cancelled.
+    ScheduledPaymentCancelled = 209,
+    /// Metadata has already been set for this payment.
+    MetadataAlreadySet = 210,
+    /// Metadata not found for this payment.
+    MetadataNotFound = 211,
+    /// Hash mismatch. The provided hash does not match the stored hash.
+    HashMismatch = 212,
+    /// Payment has already been fully paid.
+    AlreadyFullyPaid = 213,
+    /// Installment amount exceeds the remaining balance.
+    InstallmentExceedsRemaining = 214,
+    /// Partial payment not found. Verify the partial payment ID.
+    PartialPaymentNotFound = 215,
+    /// Merchant rate limit exceeded. Wait for the rate limit window to reset.
+    MerchantRateLimitExceeded = 216,
+    /// Amount rate limit exceeded. Reduce the payment amount.
+    AmountRateLimitExceeded = 217,
+    /// Payout schedule not found. Configure a payout schedule first.
+    PayoutScheduleNotFound = 218,
+    /// Payout is not yet due. Wait for the scheduled time.
+    PayoutNotYetDue = 219,
+    /// Nothing to settle. The payment has no outstanding balance.
+    NothingToSettle = 220,
+    /// Billing overflow. The billing amount exceeds the maximum allowed.
+    BillingOverflow = 221,
+    /// Invalid line item. Check the line item data.
+    InvalidLineItem = 222,
+    /// Invalid scheduled time. Use a future timestamp.
+    InvalidScheduleTime = 223,
+    /// Token not allowed. Use an allowed token.
+    TokenNotAllowed = 224,
+}
+
+/// Errors relating to recurring subscription plans, dunning cycles, and billing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+#[contracterror]
+pub enum SubscriptionError {
+    /// Subscription record was not found in storage. Resolution: verify subscription ID before executing operations.
+    NotFound = 300,
+    /// Subscription is not active (paused, cancelled, or expired). Resolution: resume or renew subscription first.
+    PaymentNotDue = 302,
+    /// Subscription charge attempted before the scheduled billing cycle date. Resolution: wait until next billing timestamp.
+    NotActive = 301,
+    /// Maximum permitted failed payment retry attempts reached. Resolution: cancel subscription or update payment method.
+    MaxRetriesExceeded = 303,
+    /// Subscription has reached its end timestamp or termination condition. Resolution: create a new subscription if desired.
+    Ended = 304,
+    /// Dunning record for tracking failed payment retries not found. Resolution: initialize dunning process on failed payment.
+    DunningNotFound = 305,
+    /// Operation requires active dunning status, but subscription is healthy. Resolution: verify subscription dunning status.
+    NotInDunning = 306,
+    /// Next automated retry attempt is not yet due. Resolution: wait until retry_interval has elapsed.
+    RetryNotDue = 307,
+    /// Dunning grace period expired without successful payment recovery. Resolution: cancel subscription and notify customer.
+    GracePeriodExpired = 308,
+    /// Payment retry attempted sooner than backoff interval allows. Resolution: obey retry backoff interval.
+    RetryTooEarly = 309,
+    /// Metered billing configuration record not found. Resolution: initialize metered subscription parameters first.
+    MeteredNotFound = 310,
+    /// Invoiced usage or charge would breach configured billing cap. Resolution: increase billing cap or throttle usage.
+    BillingCapExceeded = 311,
+    /// Subscription group ID not found in storage. Resolution: register subscription group before adding members.
+    GroupNotFound = 312,
+    /// Customer is already a member of this subscription group. Resolution: cannot add duplicate member to group.
+    AlreadyInGroup = 313,
+    /// Subscription group has reached its maximum permitted member capacity. Resolution: upgrade group tier or remove members.
+    GroupSizeLimitExceeded = 314,
+    /// Free trial period has elapsed and requires standard billing activation. Resolution: convert to paid subscription plan.
+    TrialExpired = 315,
+    /// Requested trial duration exceeds protocol maximum trial period. Resolution: configure trial duration within allowed bounds.
+    MaxTrialDurationExceeded = 316,
+    /// The merchant for this subscription is currently paused. Resolution: unpause merchant before charging subscribers.
+    MerchantPaused = 317,
+    /// Metered subscription units consumed exceed period usage cap. Resolution: reset billing period or increase unit cap.
+    UsageCapExceeded = 318,
+}
+
+/// Errors relating to multi-sig administrative proposals and voting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+#[contracterror]
+pub enum ProposalError {
+    /// Proposal ID was not found in storage. Resolution: verify proposal ID or create a new proposal.
+    NotFound = 400,
+    /// Proposal has passed its expiration deadline (proposal_ttl). Resolution: re-propose with a fresh proposal window.
+    Expired = 401,
+    /// Proposal has already been executed on-chain. Resolution: no-op; proposal action is already completed.
+    AlreadyExecuted = 402,
+    /// Required approval threshold not reached among admins. Resolution: collect remaining required admin signatures.
+    ThresholdNotMet = 403,
+    /// Action amount or sensitivity requires multi-sig proposal workflow. Resolution: submit proposal via propose_admin_action().
+    RequiresMultiSig = 404,
+    /// Total approvals collected is less than required multi-sig threshold. Resolution: wait for remaining admin approvals.
+    InsufficientApprovals = 405,
+    /// Proposal is no longer valid due to ledger timestamp exceeding expires_at. Resolution: submit new proposal.
+    ProposalExpired = 406,
+}
+
+/// Errors relating to specialized features (escrow bridging, payment channels, split payouts, loyalty, limits).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+#[contracterror]
+pub enum FeatureError {
+    /// Escrow mapping not found. Create the escrow mapping first.
+    EscrowMappingNotFound = 500,
+    /// Escrow bridge operation failed. Retry or check bridge configuration.
+    EscrowBridgeFailed = 501,
+    /// Fee configuration not found. Configure fees first.
+    FeeConfigNotFound = 502,
+    /// Insufficient fees accumulated. Wait for more fees to accumulate.
+    InsufficientFees = 503,
+    /// Condition not met. Fulfill the required condition.
+    ConditionNotMet = 504,
+    /// Condition has already been evaluated. No action needed.
+    ConditionAlreadyEvaluated = 505,
+    /// Auto-escrow rule not found. Configure the rule first.
+    AutoEscrowRuleNotFound = 506,
+    /// Auto-escrow amount is below the minimum threshold.
+    AutoEscrowBelowMinimum = 507,
+    /// Auto-escrow has already been triggered. No action needed.
+    AutoEscrowAlreadyTriggered = 508,
+    /// Condition evaluation failed. Check the condition configuration.
+    ConditionEvaluationFailed = 509,
+    /// Condition not met at runtime. Check the condition logic.
+    ConditionRuntimeNotMet = 510,
+    /// Invalid fee configuration. Fix the fee config values.
+    InvalidFeeConfig = 511,
+    /// Payment channel not found. Verify the channel ID.
+    ChannelNotFound = 512,
+    /// Invalid signature. The signature does not match the expected value.
+    InvalidSignature = 513,
+    /// Invalid nonce. Use a nonce greater than the current sequence.
+    InvalidNonce = 514,
+    /// Payment channel is closed. Open a new channel.
+    ChannelClosed = 515,
+    /// Payment channel has expired. Open a new channel.
+    ChannelExpired = 516,
+    /// Payment channel has not expired yet. Wait for expiration.
+    ChannelNotExpired = 517,
+    /// Invalid split shares. The shares do not sum to 100%.
+    InvalidSplitShares = 518,
+    /// Too many recipients. Reduce the number of recipients.
+    TooManyRecipients = 519,
+    /// Invalid counterparty. Use a valid counterparty address.
+    InvalidCounterparty = 540,
+    /// Split configuration not found. Configure splitting first.
+    SplitConfigNotFound = 520,
+    /// Split has already been executed. No action needed.
+    SplitAlreadyExecuted = 521,
+    /// Loyalty program not configured. Configure loyalty first.
+    LoyaltyNotConfigured = 522,
+    /// Insufficient loyalty points. Earn more points first.
+    InsufficientPoints = 523,
+    /// Loyalty points have expired. Earn new points.
+    PointsExpired = 524,
+    /// No fees to sweep. Accumulate fees first.
+    NothingToSweep = 525,
+    /// Sweep recipient not set. Set the sweep recipient first.
+    SweepRecipientNotSet = 526,
+    /// Spend limit exceeded. Reduce the payment amount or increase the limit.
+    SpendLimitExceeded = 527,
+    /// Spend limit not configured. Configure spend limits first.
+    SpendLimitNotConfigured = 528,
+    /// Settlement not ready. Wait for settlement conditions to be met.
+    SettlementNotReady = 529,
+    /// Finality configuration not found. Configure finality first.
+    FinalityConfigNotFound = 530,
+    /// Settlement has already been finalized. No action needed.
+    SettlementAlreadyFinalized = 531,
+    /// Rebate threshold not met. Increase the payment amount.
+    RebateThresholdNotMet = 532,
+    /// Rebate has already been claimed. No action needed.
+    RebateAlreadyClaimed = 533,
+    /// Rebate configuration not found. Configure rebates first.
+    RebateConfigNotFound = 534,
+    /// Forward configuration not found. Configure forwarding first.
+    ForwardConfigNotFound = 535,
+    /// Forward loop detected. Check the forwarding configuration.
+    ForwardLoop = 536,
+    /// Invalid forward basis points. Use bps between 0 and 10000.
+    InvalidForwardBps = 537,
+    /// Sender is the recipient. Use a different recipient.
+    SenderIsRecipient = 538,
+    /// Amount is below the minimum split amount. Increase the amount.
+    BelowMinSplitAmount = 539,
+    /// Balance sum mismatch. The settlement amounts do not sum to the deposit.
+    BalanceSumMismatch = 541,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Error {
+    Basic(BasicError),
+    Payment(PaymentError),
+    Subscription(SubscriptionError),
+    Proposal(ProposalError),
+    Feature(FeatureError),
+}
+
+impl Error {
+    /// Converts this error variant to its raw `u32` discriminant for Soroban's
+    /// `InvokeError` compatibility.
+    ///
+    /// # Returns
+    /// The `u32` discriminant corresponding to this error variant.
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            Error::Basic(e) => *e as u32,
+            Error::Payment(e) => *e as u32,
+            Error::Subscription(e) => *e as u32,
+            Error::Proposal(e) => *e as u32,
+            Error::Feature(e) => *e as u32,
+        }
+    }
+}
+
+impl From<Error> for soroban_sdk::Error {
+    fn from(e: Error) -> Self {
+        soroban_sdk::Error::from_contract_error(e.to_u32())
+    }
+}
+
+impl From<&Error> for soroban_sdk::Error {
+    fn from(e: &Error) -> Self {
+        soroban_sdk::Error::from_contract_error(e.to_u32())
+    }
+}
+
+impl TryFrom<soroban_sdk::Error> for Error {
+    type Error = soroban_sdk::Error;
+    fn try_from(error: soroban_sdk::Error) -> Result<Self, Self::Error> {
+        if error.is_type(soroban_sdk::xdr::ScErrorType::Contract) {
+            let code = error.get_code();
+            if code >= 500 && code <= 540 {
+                return Ok(Error::Feature(unsafe { core::mem::transmute(code) }));
+            }
+            if code >= 400 && code <= 406 {
+                return Ok(Error::Proposal(unsafe { core::mem::transmute(code) }));
+            }
+            if code >= 300 && code <= 318 {
+                return Ok(Error::Subscription(unsafe { core::mem::transmute(code) }));
+            }
+            if code >= 200 && code <= 224 {
+                return Ok(Error::Payment(unsafe { core::mem::transmute(code) }));
+            }
+            if code >= 100 && code <= 127 {
+                return Ok(Error::Basic(unsafe { core::mem::transmute(code) }));
+            }
+        }
+        Err(error)
+    }
+}
+
+// impl FromVal<Env, Error> for Val {
+//     fn from_val(env: &Env, v: &Error) -> Self {
+//         soroban_sdk::Error::from(v).into_val(env)
+//     }
+// }
+
+impl TryFromVal<Env, Val> for Error {
+    type Error = soroban_sdk::ConversionError;
+    fn try_from_val(env: &Env, val: &Val) -> Result<Self, Self::Error> {
+        let error: soroban_sdk::Error =
+            soroban_sdk::Error::try_from_val(env, val).map_err(|_| soroban_sdk::ConversionError)?;
+        Error::try_from(error).map_err(|_| soroban_sdk::ConversionError)
+    }
+}
+
+// Core payment data keys (≤50 variants for Soroban XDR spec limit)
+
+// Customer-specific data keys
+#[derive(Clone)]
+#[contracttype]
+pub enum CustomerDataKey {
+    Payments(Address, u64),
+    PaymentCount(Address),
+    Subscriptions(Address, u64),
+    SubscriptionCount(Address),
+    Analytics(Address),
+    RateLimit(Address),
+    FlagReason(Address),
+    Allowlist(Address),
+    FeeWaiver(Address),
+    MerchantVolume(Address, Address),
+    MerchantList(Address, u64),
+    MerchantCount(Address),
+    MonthlyVolume(Address, u64),
+    HourCount(Address, u32),
+}
+
+// Merchant-specific data keys
+#[derive(Clone)]
+#[contracttype]
+pub enum MerchantDataKey {
+    Payments(Address, u64),
+    PaymentCount(Address),
+    Subscriptions(Address, u64),
+    SubscriptionCount(Address),
+    Analytics(Address),
+    FeeRecord(Address),
+    AnalyticsBucket(Address, u64),
+    GlobalList(u64),
+    PayoutSchedule(Address),
+    RebateAccrual(Address),
+    PendingSettlementCount(Address),
+    PendingSettlementIndex(Address, u64),
+    VerificationLevel(Address),
+    VerificationTierLimit(MerchantVerificationLevel),
+    MerchantPaymentsPage(Address, u64),
+    MerchantPaused(Address),
+    MerchantActiveSubscriptions(Address, u64),
+    MerchantActiveSubscriptionCount(Address),
+    ActiveSubscriptionIndex(u64),
+    // Issue #23: 24-hour aggregate transaction volume per merchant, bucketed by day
+    DailyVolume(Address, u64),
+}
+
+// State and proposal data keys
+#[derive(Clone)]
+#[contracttype]
+pub enum StateDataKey {
+    DunningState(u64),
+    EscrowedPayment(u64),
+    EscrowedPaymentDispute(u64),
+    ConditionalPayment(u64),
+    ScheduledPayment(u64),
+    AdminProposal(String),
+    LargePaymentProposal(u64),
+    PauseHistoryEntry(u64),
+    PauseHistoryCount,
+    // Auto-escrow
+    AutoEscrowRule(Address),
+    AutoEscrowTriggered(u64),
+    PartialPaymentRecord(u64, u32), // payment_id, installment_number
+    SettlementFinalized(u64),
+    ScheduledPaymentCounter,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PayoutSchedule {
+    pub merchant: Address,
+    pub token: Address,
+    pub frequency: PayoutFrequency,
+    pub next_payout_at: u64,
+    pub accumulated: i128,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum PaymentStatus {
+    Pending,
+    Completed,
+    Refunded,
+    PartialRefunded,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum SubscriptionStatus {
+    Active,
+    Paused,
+    Cancelled,
+    Expired,
+    InDunning,
+    Suspended,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum ConditionType {
+    TimestampAfter(u64),
+    TimestampBefore(u64),
+    OraclePrice(Address, String, i128, PriceComparison),
+    CrossContractState(Address, BytesN<32>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum PriceComparison {
+    GreaterThan,
+    LessThan,
+    EqualTo,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct SubscriptionTrialData {
+    pub period_seconds: u64,
+    pub ends_at: u64,
+    pub converted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct SubscriptionPauseData {
+    pub last_paused_at: u64,
+    pub total_pause_duration: u64,
+    pub proration_enabled: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct Subscription {
+    pub id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub currency: Currency,
+    pub interval: u64, // seconds between payments
+    pub duration: u64, // total seconds the subscription lives (0 = indefinite)
+    pub status: SubscriptionStatus,
+    pub created_at: u64,
+    pub next_payment_at: u64,
+    pub ends_at: u64,       // 0 = no hard end
+    pub payment_count: u64, // successful executions so far
+    pub retry_count: u64,   // consecutive failed attempts on current cycle
+    pub max_retries: u64,   // max retries before marking failed cycle skipped
+    pub metadata: String,
+    pub trial_data: SubscriptionTrialData,
+    pub pause_data: SubscriptionPauseData,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TestError {
+    PaymentNotFound = 1,
+    InvalidStatus = 2,
+    AlreadyProcessed = 3,
+    Unauthorized = 4,
+    PaymentExpired = 5,
+    NotExpired = 6,
+    NoExpiration = 7,
+    TransferFailed = 8,
+    MetadataTooLarge = 9,
+    NotesTooLarge = 10,
+    InvalidCurrency = 11,
+    RefundExceedsPayment = 12,
+    SubscriptionNotFound = 13,
+    SubscriptionNotActive = 14,
+    PaymentNotDue = 15,
+    MaxRetriesExceeded = 16,
+    SubscriptionEnded = 17,
+    InvalidBatchSize = 18,
+    BatchPartialFailure = 19,
+    RateLimitExceeded = 20,
+    DailyVolumeExceeded = 21,
+    AddressFlagged = 60,
+    AddressAlreadyFlagged = 61,
+    AmountExceedsLimit = 23,
+    DunningNotFound = 24,
+    SubscriptionNotInDunning = 25,
+    RetryNotDue = 26,
+    GracePeriodExpired = 27,
+    EscrowMappingNotFound = 28,
+    EscrowBridgeFailed = 29,
+    MultiSigNotInitialized = 30,
+    ProposalNotFound = 31,
+    ProposalExpired = 32,
+    ProposalAlreadyExecuted = 33,
+    MultiSigThresholdNotMet = 34,
+    InsufficientAdmins = 35,
+    NotAnAdmin = 36,
+    AlreadyApproved = 37,
+    FeeConfigNotFound = 38,
+    InsufficientFees = 39,
+    ConditionNotMet = 40,
+    ConditionAlreadyEvaluated = 41,
+    OracleCallFailed = 42,
+    ContractPaused = 43,
+    FunctionPaused = 44,
+    InvalidTierThresholds = 45,
+    AutoEscrowRuleNotFound = 46,
+    AutoEscrowBelowMinimum = 47,
+    AutoEscrowAlreadyTriggered = 48,
+    PaymentNotYetDue = 54,
+    ScheduledPaymentCancelled = 55,
+    OracleFeedStale = 58,
+    OracleNotConfigured = 59,
+    ConditionEvaluationFailed = 62,
+    ConditionRuntimeNotMet = 63,
+    RetryTooEarly = 56,
+    PaymentRequiresMultiSig = 64,
+    InsufficientPaymentApprovals = 65,
+    PaymentProposalExpired = 66,
+    MetadataAlreadySet = 67,
+    MetadataNotFound = 68,
+    HashMismatch = 69,
+    PaymentAlreadyFullyPaid = 52,
+    InstallmentExceedsRemaining = 53,
+    PartialPaymentNotFound = 70,
+    MerchantRateLimitExceeded = 50,
+    AmountRateLimitExceeded = 51,
+    InvalidFeeConfig = 71,
+    InvalidAmount = 72,
+    ChannelNotFound = 73,
+    InvalidSignature = 74,
+    InvalidNonce = 75,
+    ChannelClosed = 76,
+    ChannelExpired = 77,
+    ChannelNotExpired = 78,
+    MeteredSubscriptionNotFound = 79,
+    BillingCapExceeded = 80,
+    InvalidSplitShares = 85,
+    TooManyRecipients = 86,
+    SplitConfigNotFound = 87,
+    SplitAlreadyExecuted = 88,
+    LoyaltyNotConfigured = 100,
+    InsufficientPoints = 101,
+    PointsExpired = 102,
+    // Fee sweep (#216)
+    NothingToSweep = 114,
+    SweepRecipientNotSet = 115,
+    // Customer spend limits (#217)
+    SpendLimitExceeded = 116,
+    SpendLimitNotConfigured = 117,
+    // Subscription groups (#218)
+    GroupNotFound = 118,
+    SubscriptionAlreadyInGroup = 119,
+    GroupSizeLimitExceeded = 120,
+    // Finality delay (#219)
+    SettlementNotReady = 121,
+    FinalityConfigNotFound = 122,
+    SettlementAlreadyFinalized = 123,
+    VerificationLevelNotFound = 95,
+    TierLimitsNotConfigured = 96,
+    // Fee rebate programme
+    RebateThresholdNotMet = 106,
+    RebateAlreadyClaimed = 107,
+    RebateConfigNotFound = 108,
+    PayoutScheduleNotFound = 89,
+    PayoutNotYetDue = 90,
+    NothingToSettle = 91,
+    // Payment forwarding (#220)
+    ForwardConfigNotFound = 109,
+    ForwardLoop = 110,
+    InvalidForwardBps = 111,
+    // Arithmetic safety
+    BillingOverflow = 124,
+    InvalidInterval = 125,
+}
+
+// Manual trait implementations replacing #[contracterror] (105 variants exceed the 50-variant XDR spec limit)
+// impl From<Error> for soroban_sdk::Error {
+//     #[inline(always)]
+//     fn from(val: Error) -> soroban_sdk::Error {
+//         <_ as From<&Error>>::from(&val)
+//     }
+// }
+// impl From<&Error> for soroban_sdk::Error {
+//     #[inline(always)]
+//     fn from(val: &Error) -> soroban_sdk::Error {
+//         soroban_sdk::Error::from_contract_error(*val.to_u32())
+//     }
+// }
+// impl TryFrom<soroban_sdk::Error> for Error {
+//     type Error = soroban_sdk::Error;
+//     #[inline(always)]
+//     fn try_from(error: soroban_sdk::Error) -> Result<Self, soroban_sdk::Error> {
+//         if error.is_type(soroban_sdk::xdr::ScErrorType::Contract) {
+//             let code = error.get_code();
+//             if matches!(code, 1..=21 | 23..=48 | 50..=56 | 58..=80 | 85..=91 | 95..=96 | 100..=102 | 106..=111 | 114..=125)
+//             {
+//                 // SAFETY: Error is #[repr(u32)] and all valid discriminants are covered by the matches! guard above
+//                 Ok(unsafe { core::mem::transmute::<u32, Error>(code) })
+//             } else {
+//                 Err(error)
+//             }
+//         } else {
+//             Err(error)
+//         }
+//     }
+// }
+impl TryFrom<&soroban_sdk::Error> for Error {
+    type Error = soroban_sdk::Error;
+    #[inline(always)]
+    fn try_from(error: &soroban_sdk::Error) -> Result<Self, soroban_sdk::Error> {
+        <_ as TryFrom<soroban_sdk::Error>>::try_from(*error)
+    }
+}
+impl From<Error> for soroban_sdk::InvokeError {
+    #[inline(always)]
+    fn from(val: Error) -> soroban_sdk::InvokeError {
+        <_ as From<&Error>>::from(&val)
+    }
+}
+// impl From<&Error> for soroban_sdk::InvokeError {
+//     #[inline(always)]
+//     fn from(val: &Error) -> soroban_sdk::InvokeError {
+//         soroban_sdk::InvokeError::Contract(*val as u32)
+//     }
+// }
+
+impl From<&Error> for soroban_sdk::InvokeError {
+    fn from(e: &Error) -> Self {
+        soroban_sdk::InvokeError::Contract(e.to_u32())
+    }
+}
+
+impl TryFrom<soroban_sdk::InvokeError> for Error {
+    type Error = soroban_sdk::InvokeError;
+    #[inline(always)]
+    fn try_from(error: soroban_sdk::InvokeError) -> Result<Self, soroban_sdk::InvokeError> {
+        match error {
+            soroban_sdk::InvokeError::Abort => Err(error),
+            soroban_sdk::InvokeError::Contract(code) => {
+                soroban_sdk::Error::from_contract_error(code)
+                    .try_into()
+                    .map_err(|_| error)
+            }
+        }
+    }
+}
+impl TryFrom<&soroban_sdk::InvokeError> for Error {
+    type Error = soroban_sdk::InvokeError;
+    #[inline(always)]
+    fn try_from(error: &soroban_sdk::InvokeError) -> Result<Self, soroban_sdk::InvokeError> {
+        <_ as TryFrom<soroban_sdk::InvokeError>>::try_from(*error)
+    }
+}
+// impl soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val> for Error {
+//     type Error = soroban_sdk::ConversionError;
+//     #[inline(always)]
+//     fn try_from_val(
+//         env: &soroban_sdk::Env,
+//         val: &soroban_sdk::Val,
+//     ) -> Result<Self, soroban_sdk::ConversionError> {
+//         use soroban_sdk::TryIntoVal;
+//         let error: soroban_sdk::Error = val.try_into_val(env)?;
+//         error.try_into().map_err(|_| soroban_sdk::ConversionError)
+//     }
+// }
+impl soroban_sdk::TryFromVal<soroban_sdk::Env, Error> for soroban_sdk::Val {
+    type Error = soroban_sdk::ConversionError;
+    #[inline(always)]
+    fn try_from_val(
+        _env: &soroban_sdk::Env,
+        val: &Error,
+    ) -> Result<Self, soroban_sdk::ConversionError> {
+        let error: soroban_sdk::Error = val.into();
+        Ok(error.into())
+    }
+}
+impl soroban_sdk::TryFromVal<soroban_sdk::Env, &Error> for soroban_sdk::Val {
+    type Error = soroban_sdk::ConversionError;
+    #[inline(always)]
+    fn try_from_val(
+        env: &soroban_sdk::Env,
+        val: &&Error,
+    ) -> Result<Self, soroban_sdk::ConversionError> {
+        <_ as soroban_sdk::TryFromVal<soroban_sdk::Env, Error>>::try_from_val(env, *val)
+    }
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentCreated {
+    pub payment_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentCompleted {
+    pub payment_id: u64,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentRefunded {
+    pub payment_id: u64,
+    pub customer: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentCancelled {
+    pub payment_id: u64,
+    pub cancelled_by: Address,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentExpired {
+    pub payment_id: u64,
+    pub customer: Address,
+    pub refunded_amount: i128,
+    pub expired_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallmentPaid {
+    pub payment_id: u64,
+    pub installment_number: u32,
+    pub amount: i128,
+    pub remaining: i128,
+    pub payer: Address,
+    pub paid_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentFullyPaid {
+    pub payment_id: u64,
+    pub total_installments: u32,
+    pub completed_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowedPaymentCreated {
+    pub payment_id: u64,
+    pub escrow_id: u64,
+    pub escrow_contract: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowedPaymentCompleted {
+    pub payment_id: u64,
+    pub escrow_id: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowedPaymentCancelled {
+    pub payment_id: u64,
+    pub escrow_id: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowedPaymentDisputed {
+    pub payment_id: u64,
+    pub raised_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentDisputeResolved {
+    pub payment_id: u64,
+    pub favor_customer: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionCreated {
+    pub subscription_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub interval: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringPaymentExecuted {
+    pub subscription_id: u64,
+    pub payment_count: u64,
+    pub amount: i128,
+    pub next_payment_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringPaymentFailed {
+    pub subscription_id: u64,
+    pub retry_count: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionCancelled {
+    pub subscription_id: u64,
+    pub cancelled_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RiskFeeApplied {
+    pub payment_id: u64,
+    pub base_fee_bps: u32,
+    pub risk_surcharge_bps: u32,
+    pub total_fee_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentChannel {
+    pub channel_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub token: Address,
+    pub deposited: i128,
+    pub settled: i128,
+    pub settled_nonce: u64,
+    pub open: bool,
+    pub expires_at: u64,
+    pub customer_pk: BytesN<32>,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct MeteredSubscription {
+    pub subscription_id: u64,
+    pub merchant: Address,
+    pub customer: Address,
+    pub token: Address,
+    pub price_per_unit: i128,
+    pub unit_name: String,
+    pub accumulated_units: u64,
+    pub billing_cap: Option<i128>,
+    pub last_reset_at: u64,
+    pub max_units_per_period: Option<u64>,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct SplitRecipient {
+    pub address: Address,
+    pub share_bps: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PaymentSplitConfig {
+    pub payment_id: u64,
+    pub recipients: Vec<SplitRecipient>,
+    pub executed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct PaymentForwardConfig {
+    pub merchant: Address,
+    pub forward_to: Address,
+    pub forward_bps: u32,
+    pub active: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChannelOpened {
+    pub channel_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChannelToppedUp {
+    pub channel_id: u64,
+    pub amount: i128,
+    pub new_deposited: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChannelSettled {
+    pub channel_id: u64,
+    pub merchant_amount: i128,
+    pub customer_refund: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChannelExpiredClosed {
+    pub channel_id: u64,
+    pub refunded_to: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageReported {
+    pub subscription_id: u64,
+    pub units: u64,
+    pub accumulated: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeteredBillingExecuted {
+    pub subscription_id: u64,
+    pub amount: i128,
+    pub units_billed: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BillingCapReached {
+    pub subscription_id: u64,
+    pub cap: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionPaused {
+    pub subscription_id: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionResumed {
+    pub subscription_id: u64,
+    pub next_payment_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionResumedProrated {
+    pub subscription_id: u64,
+    pub pause_duration: u64,
+    pub new_next_billing_date: u64,
+    pub prorated_amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrialStarted {
+    pub subscription_id: u64,
+    pub trial_ends_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrialConverted {
+    pub subscription_id: u64,
+    pub converted_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrialCancelled {
+    pub subscription_id: u64,
+    pub cancelled_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressFlagged {
+    pub address: Address,
+    pub reason: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressUnflagged {
+    pub address: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitBreached {
+    pub address: Address,
+    pub payment_count: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionEnteredDunning {
+    pub subscription_id: u64,
+    pub attempt: u32,
+    pub next_retry_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DunningRetryScheduled {
+    pub subscription_id: u64,
+    pub retry_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionSuspended {
+    pub subscription_id: u64,
+    pub reason: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DunningResolved {
+    pub subscription_id: u64,
+    pub resolved_at: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct RateLimitConfig {
+    pub max_payments_per_window: u32,
+    pub window_duration: u64,
+    pub max_payment_amount: i128,
+    pub max_daily_volume: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct AddressRateLimit {
+    pub address: Address,
+    pub payment_count: u32,
+    pub window_start: u64,
+    pub daily_volume: i128,
+    pub last_payment_at: u64,
+    pub flagged: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct MerchantRateLimit {
+    pub merchant: Address,
+    pub max_transactions_per_hour: u32,
+    pub max_amount_per_hour: i128,
+    pub current_transactions: u32,
+    pub current_amount: i128,
+    pub window_start: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum MerchantVerificationLevel {
+    Unverified,
+    Basic,
+    Standard,
+    Premium,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct VerificationTierLimits {
+    pub level: MerchantVerificationLevel,
+    pub tx_per_period: u32,
+    pub volume_limit: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct DunningConfig {
+    pub initial_backoff_seconds: u64,
+    pub max_retries: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct DunningState {
+    pub subscription_id: u64,
+    pub retry_count: u32,
+    pub next_retry_at: u64,
+    pub backoff_seconds: u64,
+    pub max_retries: u32,
+    pub last_failed_at: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PartialPaymentRecord {
+    pub payment_id: u64,
+    pub installment_number: u32,
+    pub amount_paid: i128,
+    pub total_amount: i128,
+    pub remaining: i128,
+    pub paid_at: u64,
+    pub payer: Address,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct Payment {
+    pub id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub currency: Currency,
+    pub status: PaymentStatus,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub metadata: String,
+    pub notes: String,
+    pub refunded_amount: i128,
+}
+
+/// Issue #70: primitive-only cross-contract verification result consumed by the
+/// refund contract. Deliberately contains no `PaymentStatus` or `Payment` field
+/// so a schema change on this side cannot break decoding on the other side.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct PaymentVerification {
+    /// `false` when the payment contract is paused and therefore cannot vouch
+    /// for any state. Callers must treat this as a hard failure.
+    pub payment_contract_available: bool,
+    /// The payment ID resolves to a stored payment.
+    pub exists: bool,
+    /// The stored payment's status is `Completed`.
+    pub is_completed: bool,
+    /// The stored payment belongs to the queried customer.
+    pub owned_by_customer: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct EscrowedPayment {
+    pub payment_id: u64,
+    pub escrow_id: u64,
+    pub escrow_contract: Address,
+    pub auto_release_on_complete: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct EscrowedPaymentDispute {
+    pub payment_id: u64,
+    pub raised_by: Address,
+    pub reason: String,
+    pub raised_at: u64,
+    pub resolved: bool,
+    pub resolved_at: Option<u64>,
+    pub favor_customer: Option<bool>,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct ConditionalPayment {
+    pub payment_id: u64,
+    pub condition: ConditionType,
+    pub condition_met: bool,
+    pub evaluated_at: Option<u64>,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct AutoEscrowRule {
+    pub merchant: Address,
+    pub escrow_bps: u32,
+    pub min_amount: i128,
+    pub token: Address,
+    pub active: bool,
+    pub escrow_contract: Address,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct ScheduledPayment {
+    pub payment_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub scheduled_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct OracleRateConfig {
+    pub oracle_address: Address,
+    pub currency: Currency,
+    pub price_feed_id: BytesN<32>,
+    pub max_staleness_seconds: u64,
+    pub enabled: bool,
+}
+
+// Dynamic fee calculation structures (#124)
+#[derive(Clone)]
+#[contracttype]
+pub struct RiskFeeConfig {
+    pub base_fee_bps: u32,
+    pub large_amount_threshold: i128,
+    pub large_amount_surcharge_bps: u32,
+    pub new_customer_surcharge_bps: u32,
+    pub high_risk_currency_surcharge: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct AnalyticsBucket {
+    pub bucket_start: u64,
+    pub bucket_end: u64,
+    pub total_payments: u64,
+    pub total_volume: i128,
+    pub total_refunds: i128,
+    pub failed_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct LoyaltyConfig {
+    pub points_per_unit: u32,
+    pub redemption_rate: u32,
+    pub expiry_seconds: u64,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct CustomerLoyaltyBalance {
+    pub customer: Address,
+    pub points: u64,
+    pub last_updated: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub enum ActionType {
+    ReleaseEscrow,
+    ResolveDispute,
+    CompletePayment,
+    RefundPayment,
+    AddAdmin,
+    RemoveAdmin,
+    UpdateRequiredSignatures,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct MultiSigConfig {
+    pub admins: Vec<Address>,
+    pub required_signatures: u32,
+    pub total_admins: u32,
+    pub proposal_ttl: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct AdminProposal {
+    pub id: String,
+    pub proposer: Address,
+    pub action_type: ActionType,
+    pub target: Address,
+    pub data: Bytes,
+    pub approvals: Vec<Address>,
+    pub approval_count: u32,
+    pub executed: bool,
+    pub rejected: bool,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct LargePaymentProposal {
+    pub payment_id: u64,
+    pub approvals: Vec<Address>,
+    pub required: u32,
+    pub proposed_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct BatchPaymentEntry {
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub currency: Currency,
+    pub expiration_duration: u64,
+    pub metadata: String,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct BatchResult {
+    pub payment_id: u64,
+    pub success: bool,
+    pub error_code: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum FeeTier {
+    Standard,
+    Premium,    // >= configured premium volume
+    Enterprise, // >= configured enterprise volume
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct FeeConfig {
+    pub fee_bps: u32,
+    pub min_fee: i128,
+    pub max_fee: i128,
+    pub treasury: Address,
+    pub fee_token: Address,
+    pub active: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct MerchantFeeRecord {
+    pub merchant: Address,
+    pub total_fees_paid: i128,
+    pub total_volume: i128,
+    pub fee_tier: FeeTier,
+    /// Volume baseline set on manual tier downgrade; automatic upgrades only
+    /// consider volume earned after this point.
+    pub tier_volume_baseline: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct FeeWaiver {
+    pub merchant: Address,
+    pub waiver_bps: u32, // reduction in basis points
+    pub valid_until: u64,
+    pub reason: String,
+    pub granted_by: Address,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct FeeRebateConfig {
+    pub threshold_volume: i128,
+    pub rebate_bps: u32,
+    pub rebate_period_seconds: u64,
+    pub active: bool,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct MerchantRebateAccrual {
+    pub merchant: Address,
+    pub accrued_rebate: i128,
+    pub period_start: u64,
+    pub period_volume: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionProposed {
+    pub proposal_id: String,
+    pub proposer: Address,
+    pub action_type: ActionType,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionApproved {
+    pub proposal_id: String,
+    pub approver: Address,
+    pub approval_count: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionExecuted {
+    pub proposal_id: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionRejected {
+    pub proposal_id: String,
+    pub rejected_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminAdded {
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminRemoved {
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeCollected {
+    pub payment_id: u64,
+    pub fee_amount: i128,
+    pub merchant: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeesWithdrawn {
+    pub amount: i128,
+    pub treasury: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantTierUpgraded {
+    pub merchant: Address,
+    pub old_tier: FeeTier,
+    pub new_tier: FeeTier,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeWaiverGranted {
+    pub merchant: Address,
+    pub waiver_bps: u32,
+    pub valid_until: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeWaiverRevoked {
+    pub merchant: Address,
+    pub revoked_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeWaiverExpired {
+    pub merchant: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConditionEvaluated {
+    pub payment_id: u64,
+    pub met: bool,
+    pub evaluated_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConditionalPaymentCreated {
+    pub payment_id: u64,
+    pub condition_type: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeConfigUpdated {
+    pub fee_bps: u32,
+    pub treasury: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractPausedEvent {
+    pub paused_by: Address,
+    pub reason: String,
+    pub paused_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractUnpausedEvent {
+    pub unpaused_by: Address,
+    pub unpaused_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionPausedEvent {
+    pub function_name: String,
+    pub paused_by: Address,
+    pub reason: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionUnpausedEvent {
+    pub function_name: String,
+    pub unpaused_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoEscrowTriggered {
+    pub payment_id: u64,
+    pub merchant: Address,
+    pub escrow_id: u64,
+    pub amount: i128,
+    pub escrow_amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LargePaymentProposed {
+    pub payment_id: u64,
+    pub proposer: Address,
+    pub required_approvals: u32,
+    pub expires_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LargePaymentApproved {
+    pub payment_id: u64,
+    pub approver: Address,
+    pub approval_count: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LargePaymentExecuted {
+    pub payment_id: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LargePaymentThresholdUpdated {
+    pub threshold: i128,
+    pub updated_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentMetadataSet {
+    pub payment_id: u64,
+    pub content_ref: String,
+    pub encrypted: bool,
+    pub set_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentMetadataUpdated {
+    pub payment_id: u64,
+    pub content_ref: String,
+    pub updated_by: Address,
+    pub version: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PaymentMetadata {
+    pub payment_id: u64,
+    pub content_ref: String,      // IPFS CID or similar
+    pub content_hash: BytesN<32>, // SHA-256 of plaintext for verification
+    pub encrypted: bool,
+    pub updated_at: u64,
+    pub version: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentMemoSet {
+    pub payment_id: u64,
+    pub memo_ref: String,
+    pub set_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentMemoUpdated {
+    pub payment_id: u64,
+    pub memo_ref: String,
+    pub updated_by: Address,
+    pub version: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentMemoVerified {
+    pub payment_id: u64,
+    pub memo_hash: BytesN<32>,
+    pub verified_at: u64,
+    pub verified_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentForwardConfigSet {
+    pub merchant: Address,
+    pub forward_to: Address,
+    pub forward_bps: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentForwardConfigRemoved {
+    pub merchant: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentForwarded {
+    pub payment_id: u64,
+    pub merchant: Address,
+    pub forward_to: Address,
+    pub forward_amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PaymentMemo {
+    pub payment_id: u64,
+    pub memo_ref: String,      // Reference to memo content (IPFS CID, URL, etc.)
+    pub memo_hash: BytesN<32>, // SHA-256 hash of memo plaintext (immutable)
+    pub reference_hash: BytesN<32>, // Hash linking memo to payment (for integrity)
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub version: u32,
+    pub created_by: Address,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PaymentAnalytics {
+    pub total_payments_created: u64,
+    pub total_payments_completed: u64,
+    pub total_payments_cancelled: u64,
+    pub total_payments_refunded: u64,
+    pub total_volume: i128,
+    pub total_refunded_volume: i128,
+    pub unique_customers: u64,
+    pub unique_merchants: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct MerchantAnalytics {
+    pub total_payments: u64,
+    pub total_volume: i128,
+    pub total_completed: u64,
+    pub total_cancelled: u64,
+    pub total_refunded: u64,
+    pub total_refunded_volume: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct CustomerAnalytics {
+    pub total_payments: u64,
+    pub total_volume: i128,
+    pub total_refunds: i128,
+    pub avg_transaction_size: i128,
+    pub peak_hour: u32,
+    pub top_merchant: Option<Address>,
+    pub top_merchant_volume: i128,
+    pub first_payment_at: u64,
+    pub last_payment_at: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PauseState {
+    pub globally_paused: bool,
+    pub paused_functions: Vec<String>,
+    pub paused_at: u64,
+    pub paused_by: Address,
+    pub pause_reason: String,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PauseHistory {
+    pub index: u64,
+    pub function_name: String,
+    pub paused: bool,
+    pub changed_by: Address,
+    pub changed_at: u64,
+    pub reason: String,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeSweepRecord {
+    pub sweep_id: u64,
+    pub amount: i128,
+    pub token: Address,
+    pub recipient: Address,
+    pub swept_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CustomerSpendLimit {
+    pub customer: Address,
+    pub limit_amount: i128,
+    pub period_seconds: u64,
+    pub used: i128,
+    pub period_start: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct SubscriptionGroup {
+    pub group_id: u64,
+    pub owner: Address,
+    pub subscription_ids: Vec<u64>,
+    pub discount_bps: u32,
+    pub active: bool,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FinalityConfig {
+    pub delay_seconds: u64,
+    pub min_amount_threshold: i128,
+    pub active: bool,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingSettlement {
+    pub payment_id: u64,
+    pub merchant: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub release_at: u64,
+}
+
+// Issue #118: Payment routing optimization
+#[derive(Clone)]
+#[contracttype]
+pub struct RouteOption {
+    pub input_token: Address,
+    pub output_token: Address,
+    pub input_amount: i128,
+    pub output_amount: i128,
+    pub fee_bps: u32,
+    pub effective_cost: i128,
+}
+
+// Issue #210: Payment tagging system
+#[derive(Clone)]
+#[contracttype]
+pub struct PaymentTagSet {
+    pub payment_id: u64,
+    pub tags: Vec<BytesN<32>>,
+}
+
+// Issue #205: Invoice-based payment with line items
+#[derive(Clone)]
+#[contracttype]
+pub struct LineItem {
+    pub description_hash: BytesN<32>,
+    pub quantity: u32,
+    pub unit_price: i128,
+    pub amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct PaymentInvoice {
+    pub invoice_id: u64,
+    pub payment_id: u64,
+    pub items: Vec<LineItem>,
+    pub subtotal: i128,
+    pub tax: i128,
+    pub total: i128,
+    pub issued_at: u64,
+}
+
+#[contract]
+pub struct PaymentContract;
+
+// Constants for size limits
+const MAX_METADATA_SIZE: u32 = 512;
+const MAX_NOTES_SIZE: u32 = 1024;
+const DEFAULT_MAX_RETRIES: u64 = 3;
+const SECONDS_PER_DAY: u64 = 86400;
+const MAX_TRIAL_DURATION: u64 = 90 * SECONDS_PER_DAY; // 90 days max trial
+
+// Fee tier volume thresholds (raw token units)
+const PREMIUM_VOLUME_THRESHOLD: i128 = 10_000;
+const ENTERPRISE_VOLUME_THRESHOLD: i128 = 100_000;
+const INITIAL_SCHEMA_VERSION: u32 = 1;
+
+// Gas estimation constants used by the dry-run migration helper (Issue #89).
+// These model the dominant cost drivers of a schema migration: a fixed base
+// cost for opening the migration plus a per-record cost for converting each
+// stored record to the new schema layout.
+const MIGRATION_BASE_GAS: u64 = 50_000;
+const MIGRATION_GAS_PER_RECORD: u64 = 1_500;
+
+/// Read-only impact report produced by [`PaymentContract::dry_run_migrate_schema`].
+///
+/// The report lets admins estimate the cost and blast radius of a schema
+/// migration on mainnet or testnet without committing irreversible storage
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MigrationReport {
+    /// Schema version recorded before the migration.
+    pub current_version: u32,
+    /// Schema version the migration would move storage to.
+    pub target_version: u32,
+    /// Number of stored records that would be converted by the migration.
+    pub converted_records: u64,
+    /// Estimated gas, in instructions, the migration would consume.
+    pub gas_estimate: u64,
+    /// Always `true` for dry-run reports, distinguishing them from real runs.
+    pub dry_run: bool,
+}
+
 #[contractimpl]
 impl PaymentContract {
     /// Initializes the payment contract with a single admin and default multisig config.
@@ -32,6 +2015,7 @@ impl PaymentContract {
     /// # Panics
     /// Panics if the contract has already been initialized.
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env
             .storage()
             .instance()
@@ -72,13 +2056,21 @@ impl PaymentContract {
 
     /// Migrates the contract storage schema to a target version.
     ///
+    /// Every data transformation registered for the versions between the
+    /// current schema version and `target_version` is executed **before**
+    /// `target_version` is written to storage. If a single entry cannot be
+    /// migrated the call returns `Error::Basic(BasicError::SchemaMigrationFailed)`
+    /// and the whole transaction is reverted, so the stored version can never
+    /// be bumped on top of partially migrated (or corrupted) state.
+    ///
     /// # Arguments
     /// * `admin` - The admin authorizing the migration (must be in the multisig admin list)
     /// * `target_version` - The schema version to migrate to
     ///
     /// # Returns
     /// `Ok(())` on success, or an error if the caller is not an admin, the target version
-    /// is not greater than the current version, or multisig is not initialized.
+    /// is not greater than the current version, multisig is not initialized, or a data
+    /// migration step failed.
     pub fn migrate_schema(env: Env, admin: Address, target_version: u32) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
@@ -95,10 +2087,55 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::SchemaAlreadyAtTarget));
         }
 
+        // Issue #88: run every data migration first. `target_version` is only
+        // persisted once all transformations have completed successfully.
+        Self::run_data_migrations(&env, current, target_version)?;
+
         env.storage()
             .instance()
             .set(&DataKey::Config(ConfigKey::SchemaVersion), &target_version);
         Ok(())
+    }
+
+    /// Simulates a schema migration and returns an impact report without
+    /// modifying any storage (Issue #89).
+    ///
+    /// The report includes the number of records that would be converted and a
+    /// gas estimate for the migration, letting admins rehearse the migration
+    /// against a live deployment before executing it for real.
+    ///
+    /// This function is read-only: calling it repeatedly with the same target
+    /// version returns an identical report and never advances the schema
+    /// version.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `target_version` - The schema version the migration would move storage to.
+    ///
+    /// # Returns
+    /// A `MigrationReport` describing the migration impact.
+    pub fn dry_run_migrate_schema(env: Env, target_version: u32) -> MigrationReport {
+        let current_version = Self::get_schema_version(env.clone());
+        let payment_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::Counter))
+            .unwrap_or(0);
+        let subscription_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Subscription(SubscriptionKey::Counter))
+            .unwrap_or(0);
+        let converted_records = payment_count.saturating_add(subscription_count);
+        let gas_estimate = MIGRATION_BASE_GAS
+            .saturating_add(MIGRATION_GAS_PER_RECORD.saturating_mul(converted_records));
+        MigrationReport {
+            current_version,
+            target_version,
+            converted_records,
+            gas_estimate,
+            dry_run: true,
+        }
     }
 
     /// Sets the verification level for a specific merchant.
@@ -892,9 +2929,10 @@ impl PaymentContract {
         if schedule.accumulated == 0 {
             return Err(Error::Payment(PaymentError::NothingToSettle));
         }
-        let token_client = token::Client::new(&env, &schedule.token);
-        let contract_address = env.current_contract_address();
-        token_client.transfer(&contract_address, &merchant, &schedule.accumulated);
+
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Update internal accounting balances and payout schedule before external token transfer
+        let payout_amount = schedule.accumulated;
         schedule.accumulated = 0;
         let period = match schedule.frequency {
             PayoutFrequency::Immediate => SECONDS_PER_DAY,
@@ -904,9 +2942,14 @@ impl PaymentContract {
         };
         schedule.next_payout_at = schedule.next_payout_at + period;
         env.storage().instance().set(
-            &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant)),
+            &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant.clone())),
             &schedule,
         );
+
+        // Interaction: External token transfer
+        let token_client = token::Client::new(&env, &schedule.token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer(&contract_address, &merchant, &payout_amount);
         Ok(())
     }
 
@@ -964,6 +3007,9 @@ impl PaymentContract {
 
         // Check merchant rate limits
         PaymentContract::check_merchant_rate_limit(env, &merchant, amount)?;
+
+        // Issue #23: Enforce verification tier limits on 24-hour aggregate volume
+        PaymentContract::check_and_update_daily_tier_volume(env, &merchant, amount)?;
 
         // Check customer spend limit (#217)
         PaymentContract::check_and_update_spend_limit(env, &customer, amount)?;
@@ -1274,6 +3320,7 @@ impl PaymentContract {
     /// # Panics
     /// Panics if the payment is not found.
     pub fn get_payment(env: &Env, payment_id: u64) -> Payment {
+        storage::extend_instance(env);
         env.storage()
             .instance()
             .get(&DataKey::Payment(PaymentKey::Data(payment_id)))
@@ -1282,14 +3329,85 @@ impl PaymentContract {
 
     /// Used by the refund contract for cross-contract ownership verification (#143).
     /// Returns true if the payment exists, belongs to `customer`, and is Completed.
+    ///
+    /// # Arguments
+    /// * `payment_id` - The payment ID to verify.
+    /// * `customer` - The customer address to verify ownership for.
+    ///
+    /// # Returns
+    /// `true` only when this contract is available (not paused), the payment
+    /// exists, is `Completed`, and belongs to `customer`.
+    ///
+    /// # Panics
+    /// Never panics. Issue #70: a paused payment contract must make the refund
+    /// contract fail safely rather than let a refund through against state the
+    /// payment contract can no longer vouch for.
     pub fn check_payment_customer(env: Env, payment_id: u64, customer: Address) -> bool {
-        let payment: Option<Payment> = env
+        let verification = Self::get_payment_verification(env, payment_id, customer);
+        verification.payment_contract_available
+            && verification.exists
+            && verification.is_completed
+            && verification.owned_by_customer
+    }
+
+    /// Cross-contract state verification for the refund contract (issue #70).
+    ///
+    /// Every field is a primitive so the caller never has to decode an enum or
+    /// struct it might not know: if the payment contract's schema ever drifts,
+    /// the call still decodes and the caller can fail safely on
+    /// `payment_contract_available == false` instead of hitting an opaque host
+    /// error.
+    ///
+    /// # Arguments
+    /// * `payment_id` - The payment ID to verify.
+    /// * `customer` - The customer address the refund would be paid to.
+    ///
+    /// # Returns
+    /// A `PaymentVerification` with:
+    /// - `payment_contract_available`: `false` when this contract is globally
+    ///   paused or when `get_payment_verification` itself is paused, so callers
+    ///   can distinguish "the payment contract cannot answer" from "the answer is
+    ///   no".
+    /// - `exists`: the payment ID resolves to a stored payment.
+    /// - `is_completed`: the payment status is `Completed`.
+    /// - `owned_by_customer`: the stored payment's customer matches.
+    pub fn get_payment_verification(
+        env: Env,
+        payment_id: u64,
+        customer: Address,
+    ) -> PaymentVerification {
+        // A paused payment contract must not vouch for anything: the refund
+        // contract has to fail safely rather than trust state the payment
+        // contract can no longer service.
+        if Self::is_function_paused(
+            env.clone(),
+            String::from_str(&env, "get_payment_verification"),
+        ) {
+            return PaymentVerification {
+                payment_contract_available: false,
+                exists: false,
+                is_completed: false,
+                owned_by_customer: false,
+            };
+        }
+
+        match env
             .storage()
             .instance()
-            .get(&DataKey::Payment(PaymentKey::Data(payment_id)));
-        match payment {
-            Some(p) => p.customer == customer && p.status == PaymentStatus::Completed,
-            None => false,
+            .get::<DataKey, Payment>(&DataKey::Payment(PaymentKey::Data(payment_id)))
+        {
+            Some(p) => PaymentVerification {
+                payment_contract_available: true,
+                exists: true,
+                is_completed: p.status == PaymentStatus::Completed,
+                owned_by_customer: p.customer == customer,
+            },
+            None => PaymentVerification {
+                payment_contract_available: true,
+                exists: false,
+                is_completed: false,
+                owned_by_customer: false,
+            },
         }
     }
 
@@ -2142,6 +4260,18 @@ impl PaymentContract {
         let escrow_carveout = PaymentContract::get_auto_escrow_carveout(env, &payment);
         let merchant_amount = net_amount - escrow_carveout;
 
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Persist payment completion status and fee records before executing external token transfers
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+        PaymentContract::update_merchant_fee_record_post_completion(
+            env,
+            payment.merchant.clone(),
+            payment.amount,
+            fee_amount,
+        );
+
         // Pull merchant proceeds into the contract, then honor payout schedule.
         let token_client = token::Client::new(env, &payment.token);
         let contract_address = env.current_contract_address();
@@ -2201,16 +4331,6 @@ impl PaymentContract {
                 }
             }
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
-        PaymentContract::update_merchant_fee_record_post_completion(
-            env,
-            payment.merchant.clone(),
-            payment.amount,
-            fee_amount,
-        );
 
         // Update analytics
         let mut analytics: PaymentAnalytics = env
@@ -2722,14 +4842,23 @@ impl PaymentContract {
         Ok(())
     }
 
-    /// Returns the full installment payment history for a given payment.
+    /// Returns a paginated list of the full installment payment history for a
+    /// given payment.
     ///
     /// # Arguments
     /// * `payment_id` - The ID of the payment to retrieve installment history for
+    /// * `limit` - Maximum number of installments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
+    /// * `offset` - Number of installments to skip for pagination
     ///
     /// # Returns
-    /// A `Vec<PartialPaymentRecord>` of all installments made toward the payment.
-    pub fn get_installment_history(env: Env, payment_id: u64) -> Vec<PartialPaymentRecord> {
+    /// A `Vec<PartialPaymentRecord>` with at most `limit` installment records.
+    pub fn get_installment_history(
+        env: Env,
+        payment_id: u64,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<PartialPaymentRecord> {
         let installment_counter: u32 = env
             .storage()
             .instance()
@@ -2739,18 +4868,47 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut history = Vec::new(&env);
-        for i in 1..=installment_counter {
+        if limit == 0 {
+            return history;
+        }
+
+        let total: u64 = installment_counter as u64;
+        let mut collected = 0u64;
+        let mut skipped = 0u64;
+        let mut index = total;
+        // Newest-first, mirroring the other history queries.
+        while index > 0 && collected < Self::clamp_page_size(limit) {
+            index -= 1;
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
             if let Some(record) =
                 env.storage()
                     .instance()
                     .get(&DataKey::State(StateDataKey::PartialPaymentRecord(
-                        payment_id, i,
+                        payment_id,
+                        (index + 1) as u32,
                     )))
             {
                 history.push_back(record);
+                collected += 1;
             }
         }
         history
+    }
+
+    /// Returns the number of installments recorded for a payment.
+    ///
+    /// Use this with [`Self::get_installment_history`] to page through the full
+    /// list.
+    pub fn get_installment_count(env: Env, payment_id: u64) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::PartialPaymentCounter(
+                payment_id,
+            )))
+            .unwrap_or(0)
     }
 
     /// Returns the outstanding balance remaining on a payment.
@@ -2927,14 +5085,16 @@ impl PaymentContract {
             }
         }
 
+        // Issue #109: Checks-Effects-Interactions (CEI) pattern
+        // Effect: Mark status as Refunded and update storage before any outgoing installment transfers
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+
         // #557: return any installments the customer already paid toward this
         // still-Pending payment before it becomes Refunded. A payment with no
         // installment history transfers nothing.
         PaymentContract::return_collected_installments(env, &payment, payment_id);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
 
         // Update analytics
         let mut analytics: PaymentAnalytics = env
@@ -3201,9 +5361,15 @@ impl PaymentContract {
 
     /// Returns a paginated list of payments made by a customer.
     ///
+    /// Payment ids are stored individually under
+    /// `Customer(Payments(customer, index))`, and the page size is capped at
+    /// `MAX_QUERY_PAGE_SIZE` (Issue #87) so a customer with a long payment
+    /// history can never produce a result set larger than a single ledger entry.
+    ///
     /// # Arguments
     /// * `customer` - The customer address to query
-    /// * `limit` - Maximum number of payments to return
+    /// * `limit` - Maximum number of payments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
     /// * `offset` - The number of payments to skip (for pagination)
     ///
     /// # Returns
@@ -3223,8 +5389,11 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut payments = Vec::new(&env);
+        // Issue #87: never build a result set larger than a single page.
         let start = offset;
-        let end = (offset + limit).min(total_count);
+        let end = offset
+            .saturating_add(PaymentContract::clamp_page_size(limit))
+            .min(total_count);
 
         for i in start..end {
             if let Some(payment_id) =
@@ -3264,9 +5433,15 @@ impl PaymentContract {
 
     /// Returns a paginated list of payments received by a merchant.
     ///
+    /// Payment ids are stored individually under
+    /// `Merchant(Payments(merchant, index))`, and the page size is capped at
+    /// `MAX_QUERY_PAGE_SIZE` (Issue #87) so a merchant with a long payment
+    /// history can never produce a result set larger than a single ledger entry.
+    ///
     /// # Arguments
     /// * `merchant` - The merchant address to query
-    /// * `limit` - Maximum number of payments to return
+    /// * `limit` - Maximum number of payments to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`)
     /// * `offset` - The number of payments to skip (for pagination)
     ///
     /// # Returns
@@ -3286,8 +5461,11 @@ impl PaymentContract {
             .unwrap_or(0);
 
         let mut payments = Vec::new(&env);
+        // Issue #87: never build a result set larger than a single page.
         let start = offset;
-        let end = (offset + limit).min(total_count);
+        let end = offset
+            .saturating_add(PaymentContract::clamp_page_size(limit))
+            .min(total_count);
 
         for i in start..end {
             if let Some(payment_id) =
@@ -5074,14 +7252,15 @@ impl PaymentContract {
         };
 
         if refund_amount > 0 {
-            token_client.transfer(&contract_address, &payment.customer, &refund_amount);
-
-            // Clear the cached outstanding balance so a later query recomputes
-            // against the now-terminal payment instead of returning stale data.
+            // Issue #109: Checks-Effects-Interactions (CEI) pattern
+            // Effect: Clear cached outstanding balance before external transfer
             env.storage().instance().set(
                 &DataKey::Payment(PaymentKey::OutstandingBalance(payment_id)),
                 &payment.amount,
             );
+
+            // Interaction: External token transfer
+            token_client.transfer(&contract_address, &payment.customer, &refund_amount);
         }
 
         refund_amount
@@ -5744,6 +7923,36 @@ impl PaymentContract {
             &limit,
         );
 
+        Ok(())
+    }
+
+    /// Issue #23: Tracks a merchant's 24-hour aggregate transaction volume, bucketed
+    /// by calendar day, and rejects the payment if it would push that aggregate past
+    /// the merchant's verification tier's `volume_limit`. Merchants with no configured
+    /// tier limits are unaffected.
+    fn check_and_update_daily_tier_volume(
+        env: &Env,
+        merchant: &Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        let level = Self::get_merchant_verification_level(env.clone(), merchant.clone());
+        let tier_limits = match Self::get_tier_limits(env.clone(), level) {
+            Some(l) if l.volume_limit > 0 => l,
+            _ => return Ok(()),
+        };
+
+        let now = env.ledger().timestamp();
+        let day_bucket = now / SECONDS_PER_DAY;
+        let key = DataKey::Merchant(MerchantDataKey::DailyVolume(merchant.clone(), day_bucket));
+
+        let current_volume: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        let new_volume = current_volume.saturating_add(amount);
+
+        if new_volume > tier_limits.volume_limit {
+            return Err(Error::Basic(BasicError::DailyTierLimitExceeded));
+        }
+
+        env.storage().instance().set(&key, &new_volume);
         Ok(())
     }
 
@@ -7947,8 +10156,11 @@ impl PaymentContract {
     /// # Returns
     /// `Ok(())` on success.
     ///
-    /// # Errors
-    /// Returns an error if the caller is not an authorized admin.
+    /// Alias for pause_contract to pause all operations.
+    pub fn pause(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        Self::pause_contract(env, admin, reason)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
@@ -9556,7 +11768,7 @@ impl PaymentContract {
         signature: BytesN<64>,
     ) -> Result<(), Error> {
         Self::require_not_paused(&env, "settle_channel")?;
-        
+
         let mut channel: PaymentChannel = env
             .storage()
             .instance()
@@ -9582,11 +11794,13 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::InvalidAmount));
         }
 
-        // Verify signature over (channel_id, merchant_amount, nonce)
+        // Issue #113: Verify signature over (channel_id, merchant_amount, nonce, contract_address)
+        // Including the contract address prevents cross-channel replay attacks.
         let mut msg = Bytes::new(&env);
         msg.append(&channel_id.to_xdr(&env));
         msg.append(&merchant_amount.to_xdr(&env));
         msg.append(&nonce.to_xdr(&env));
+        msg.append(&env.current_contract_address().to_xdr(&env));
 
         env.crypto()
             .ed25519_verify(&channel.customer_pk, &msg, &signature);
@@ -9879,7 +12093,10 @@ impl PaymentContract {
                 .unwrap_or_else(|| Vec::new(&env));
             page.push_back(payment_id);
             env.storage().instance().set(
-                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(merchant.clone(), page_num)),
+                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
+                    merchant.clone(),
+                    page_num,
+                )),
                 &page,
             );
         }
@@ -10096,10 +12313,9 @@ impl PaymentContract {
 
         // Mark payment as Completed to prevent subsequent complete_payment calls
         payment.status = PaymentStatus::Completed;
-        env.storage().instance().set(
-            &DataKey::Payment(PaymentKey::Data(payment_id)),
-            &payment,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
 
         Ok(())
     }
@@ -10197,7 +12413,20 @@ impl PaymentContract {
     /// # Errors
     /// Returns an error if the caller is not an admin, the sweep recipient
     /// is not set, the fee config is missing, or there are no fees to sweep.
-    pub fn sweep_platform_fees(env: Env, admin: Address) -> Result<i128, Error> {
+    /// Sweeps up to `sweep_amount` of accumulated platform fees to the configured recipient.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must be a multi-sig admin).
+    /// * `sweep_amount` - The amount of accumulated fees to sweep.
+    ///
+    /// # Returns
+    /// The amount swept as `i128`.
+    ///
+    /// # Errors
+    /// Returns an error if the caller is not an admin, the sweep recipient
+    /// is not set, accumulated fees are empty, `sweep_amount` exceeds accumulated fees,
+    /// or multisig approval is required for amounts above threshold.
+    pub fn sweep_fees(env: Env, admin: Address, sweep_amount: i128) -> Result<i128, Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
             .storage()
@@ -10220,16 +12449,38 @@ impl PaymentContract {
         if accumulated <= 0 {
             return Err(Error::Feature(FeatureError::NothingToSweep));
         }
+
+        // Issue #111: Mathematical assertion — sweep amount must never exceed accumulated fees.
+        let sweep_amount: i128 = accumulated;
+        assert!(
+            sweep_amount <= accumulated,
+            "sweep_amount ({}) exceeds accumulated_fees ({})",
+            sweep_amount,
+            accumulated
+        );
+
+        // Issue #111: Require multisig approval for sweeps exceeding the threshold.
+        let sweep_threshold: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::LargePaymentThreshold))
+            .unwrap_or(0);
+        if sweep_threshold > 0 && sweep_amount > sweep_threshold {
+            if config.required_signatures > 1 {
+                return Err(Error::Basic(BasicError::InsufficientAdmins));
+            }
+        }
+
         let fee_config: FeeConfig = env
             .storage()
             .instance()
             .get(&DataKey::Config(ConfigKey::FeeConfig))
             .ok_or(Error::Feature(FeatureError::FeeConfigNotFound))?;
         let token_client = token::Client::new(&env, &fee_config.fee_token);
-        token_client.transfer(&env.current_contract_address(), &recipient, &accumulated);
+        token_client.transfer(&env.current_contract_address(), &recipient, &sweep_amount);
         env.storage()
             .instance()
-            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &0i128);
+            .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &remaining);
         let sweep_id: u64 = env
             .storage()
             .instance()
@@ -10241,7 +12492,7 @@ impl PaymentContract {
             .set(&DataKey::Feature(FeatureKey::SweepCounter), &sweep_id);
         let record = FeeSweepRecord {
             sweep_id,
-            amount: accumulated,
+            amount: sweep_amount,
             token: fee_config.fee_token,
             recipient,
             swept_at: env.ledger().timestamp(),
@@ -10250,7 +12501,7 @@ impl PaymentContract {
             &DataKey::Feature(FeatureKey::SweepHistory(sweep_id)),
             &record,
         );
-        Ok(accumulated)
+        Ok(sweep_amount)
     }
 
     /// Returns the most recent fee sweep records, up to the specified limit.
@@ -10727,14 +12978,29 @@ impl PaymentContract {
         Ok(())
     }
 
-    /// Returns all pending (non-finalized) settlements for a merchant.
+    /// Returns a paginated list of pending (non-finalized) settlements for a merchant.
+    ///
+    /// Records are stored individually under
+    /// `Merchant(PendingSettlementIndex(merchant, index))` and read back in
+    /// pages, so a merchant with a long settlement backlog can never blow the
+    /// Soroban ledger entry limit of a single query result.
     ///
     /// # Arguments
     /// * `merchant` - The merchant address.
+    /// * `limit` - Maximum number of settlements to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of `PendingSettlement` records that have not yet been finalized.
-    pub fn get_pending_settlements(env: Env, merchant: Address) -> Vec<PendingSettlement> {
+    /// A vector of at most `limit` `PendingSettlement` records that have not
+    /// been finalized yet. An empty vector is returned when `limit` is `0` or
+    /// `offset` is beyond the end of the index.
+    pub fn get_pending_settlements(
+        env: Env,
+        merchant: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<PendingSettlement> {
         let count: u64 = env
             .storage()
             .instance()
@@ -10742,8 +13008,15 @@ impl PaymentContract {
                 merchant.clone(),
             )))
             .unwrap_or(0);
+
         let mut result = Vec::new(&env);
-        for i in 0..count {
+        if limit == 0 || offset >= count {
+            return result;
+        }
+
+        let end = core::cmp::min(count, offset.saturating_add(Self::clamp_page_size(limit)));
+        let mut i = offset;
+        while i < end {
             if let Some(payment_id) =
                 env.storage()
                     .instance()
@@ -10763,8 +13036,33 @@ impl PaymentContract {
                     }
                 }
             }
+            i += 1;
         }
         result
+    }
+
+    /// Returns the number of settlement index slots held by a merchant.
+    ///
+    /// Use this with [`Self::get_pending_settlements`] to page through the
+    /// full list.
+    pub fn get_pending_settlement_count(env: Env, merchant: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Merchant(MerchantDataKey::PendingSettlementCount(
+                merchant,
+            )))
+            .unwrap_or(0)
+    }
+
+    /// Maximum number of records a single paginated query may return (Issue #87).
+    ///
+    /// Requesting more than this is silently clamped so a caller can never ask
+    /// for a result set that would exceed Soroban's ledger entry size limit.
+    const MAX_QUERY_PAGE_SIZE: u64 = 100;
+
+    /// Clamps a caller supplied page size to `MAX_QUERY_PAGE_SIZE`.
+    fn clamp_page_size(limit: u64) -> u64 {
+        core::cmp::min(limit, Self::MAX_QUERY_PAGE_SIZE)
     }
 
     // ── Issue #127: Dunning automation aliases ────────────────────────────
@@ -10937,17 +13235,11 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::InvalidAmount));
         }
 
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::Payment(PaymentKey::Tag(payment_id)))
-        {
+        if storage::has_persistent(&env, &DataKey::Payment(PaymentKey::Tag(payment_id))) {
             return Err(Error::Payment(PaymentError::AlreadyProcessed));
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::Tag(payment_id)), &tags);
+        storage::set_persistent(&env, &DataKey::Payment(PaymentKey::Tag(payment_id)), &tags);
 
         Ok(())
     }
@@ -10960,11 +13252,10 @@ impl PaymentContract {
     /// # Returns
     /// A vector of `BytesN<32>` tag hashes. Returns an empty vector if no tags exist.
     pub fn get_payment_tags(env: Env, payment_id: u64) -> Vec<BytesN<32>> {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, Vec<BytesN<32>>>(&DataKey::Payment(PaymentKey::Tag(payment_id)))
-        {
+        match storage::get_persistent::<_, Vec<BytesN<32>>>(
+            &env,
+            &DataKey::Payment(PaymentKey::Tag(payment_id)),
+        ) {
             Some(tags) => tags,
             None => Vec::new(&env),
         }
@@ -10997,11 +13288,9 @@ impl PaymentContract {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
 
-        let mut tags: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::Tag(payment_id)))
-            .ok_or(Error::Payment(PaymentError::NotFound))?;
+        let mut tags: Vec<BytesN<32>> =
+            storage::get_persistent(&env, &DataKey::Payment(PaymentKey::Tag(payment_id)))
+                .ok_or(Error::Payment(PaymentError::NotFound))?;
 
         // Find and remove the tag
         let mut found = false;
@@ -11018,9 +13307,11 @@ impl PaymentContract {
             return Err(Error::Payment(PaymentError::NotFound));
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::Tag(payment_id)), &new_tags);
+        storage::set_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::Tag(payment_id)),
+            &new_tags,
+        );
 
         Ok(())
     }
@@ -11058,11 +13349,7 @@ impl PaymentContract {
         }
 
         // Check if invoice already attached
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::Payment(PaymentKey::Invoice(payment_id)))
-        {
+        if storage::has_persistent(&env, &DataKey::Payment(PaymentKey::Invoice(payment_id))) {
             return Err(Error::Payment(PaymentError::AlreadyProcessed));
         }
 
@@ -11086,13 +13373,11 @@ impl PaymentContract {
         }
 
         // Get next invoice ID
-        let invoice_id: u64 = env
-            .storage()
-            .persistent()
-            .get::<_, u64>(&DataKey::Payment(PaymentKey::InvoiceCounter))
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or(Error::Basic(BasicError::InvalidAmount))?;
+        let invoice_id: u64 =
+            storage::get_persistent::<_, u64>(&env, &DataKey::Payment(PaymentKey::InvoiceCounter))
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(Error::Basic(BasicError::InvalidAmount))?;
 
         // Create and store invoice
         let invoice = PaymentInvoice {
@@ -11105,13 +13390,18 @@ impl PaymentContract {
             issued_at: env.ledger().timestamp(),
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::Invoice(payment_id)), &invoice);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Payment(PaymentKey::InvoiceCounter), &invoice_id);
-        env.storage().persistent().set(
+        storage::set_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::Invoice(payment_id)),
+            &invoice,
+        );
+        storage::set_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::InvoiceCounter),
+            &invoice_id,
+        );
+        storage::set_persistent(
+            &env,
             &DataKey::Payment(PaymentKey::InvoicePaymentId(invoice_id)),
             &payment_id,
         );
@@ -11127,13 +13417,11 @@ impl PaymentContract {
     /// # Returns
     /// `Some(PaymentInvoice)` if the invoice exists, `None` otherwise.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Option<PaymentInvoice> {
-        let payment_id: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::InvoicePaymentId(invoice_id)))?;
-        env.storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::Invoice(payment_id)))
+        let payment_id: u64 = storage::get_persistent(
+            &env,
+            &DataKey::Payment(PaymentKey::InvoicePaymentId(invoice_id)),
+        )?;
+        storage::get_persistent(&env, &DataKey::Payment(PaymentKey::Invoice(payment_id)))
     }
 
     /// Returns the invoice attached to a specific payment.
@@ -11144,9 +13432,7 @@ impl PaymentContract {
     /// # Returns
     /// `Some(PaymentInvoice)` if an invoice is attached, `None` otherwise.
     pub fn get_payment_invoice(env: Env, payment_id: u64) -> Option<PaymentInvoice> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Payment(PaymentKey::Invoice(payment_id)))
+        storage::get_persistent(&env, &DataKey::Payment(PaymentKey::Invoice(payment_id)))
     }
 
     /// Verifies that an invoice's stored total matches a recalculation of its line items.
@@ -11185,6 +13471,8 @@ mod test;
 
 #[cfg(test)]
 mod test_analytics;
+#[cfg(test)]
+mod test_daily_tier_volume;
 
 #[cfg(test)]
 mod test_trial;
@@ -11229,3 +13517,9 @@ mod test_scheduled_payment;
 
 #[cfg(test)]
 mod schema_version_test;
+
+#[cfg(test)]
+mod test_schema_migration;
+
+#[cfg(test)]
+mod test_paginated_queries;
