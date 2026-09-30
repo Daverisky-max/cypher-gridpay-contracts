@@ -30,7 +30,7 @@ Clawback follows a strict three-phase sequence:
 
 - Only registered multisig admins may initiate, execute, or cancel a clawback.
 - Only one active (non-executed, non-cancelled) clawback request may exist per escrow at a time. A second initiation for the same escrow while a live request exists returns `AlreadyProcessed`.
-- Executing before the delay elapses returns `ActionError::NotReady`.
+- Executing before the delay elapses returns `EscrowError::TimelockNotElapsed`.
 - No fees are deducted — the entire locked amount transfers to the admin.
 
 ### Error reference

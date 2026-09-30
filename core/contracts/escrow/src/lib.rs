@@ -541,7 +541,7 @@ pub enum TestError {
     ReleaseNotYetAvailable = 5,
     NotDisputed = 6,
     TimeoutNotReached = 7,
-    ReleaseOnHoldPeriod = 8,
+    HoldPeriodActive = 8,
     InvalidVestingSchedule = 9,
     CliffPeriodNotPassed = 10,
     MilestoneAlreadyReleased = 11,
@@ -1060,7 +1060,9 @@ pub struct Escrow {
     pub dispute_started_at: u64,
     pub last_activity_at: u64,
     pub escalation_level: u64,
-    pub min_hold_period: u64,
+    /// Timestamp until which the escrow is held (buyer protection period).
+    /// Represents the mandatory inspection period after creation.
+    pub hold_period_until: u64,
     pub fee_bps: i128,
     pub expiry_timestamp: u64,
     pub auto_refund_on_expiry: bool,
@@ -2868,6 +2870,9 @@ impl EscrowContract {
                 favor: AutoResolveFavor::Customer,
             });
 
+        // Compute hold_period_until: when the mandatory buyer inspection period ends
+        let hold_period_until = current_timestamp.saturating_add(min_hold_period);
+
         let escrow = Escrow {
             id: escrow_id,
             customer: customer.clone(),
@@ -2880,7 +2885,7 @@ impl EscrowContract {
             dispute_started_at: 0,
             last_activity_at: current_timestamp,
             escalation_level: 0,
-            min_hold_period,
+            hold_period_until,
             fee_bps,
             expiry_timestamp,
             auto_refund_on_expiry,
@@ -3898,8 +3903,8 @@ impl EscrowContract {
                         return Err(Error::Escrow(EscrowError::ReleaseNotYetAvailable));
                     }
 
-                    if current_time < escrow.created_at + escrow.min_hold_period {
-                        return Err(Error::Escrow(EscrowError::ReleaseOnHoldPeriod));
+                    if current_time < escrow.hold_period_until {
+                        return Err(Error::Escrow(EscrowError::HoldPeriodActive));
                     }
                 }
                 Ok(())
@@ -4083,8 +4088,8 @@ impl EscrowContract {
         match escrow.status {
             EscrowStatus::Locked => {
                 let current_time = env.ledger().timestamp();
-                if current_time < escrow.created_at + escrow.min_hold_period {
-                    return Err(Error::Escrow(EscrowError::ReleaseOnHoldPeriod));
+                if current_time < escrow.hold_period_until {
+                    return Err(Error::Escrow(EscrowError::HoldPeriodActive));
                 }
                 escrow.status = EscrowStatus::Resolved;
             }
@@ -7419,8 +7424,8 @@ impl EscrowContract {
                             if current_time < escrow.release_timestamp {
                                 return Err(Error::Escrow(EscrowError::ReleaseNotYetAvailable));
                             }
-                            if current_time < escrow.created_at + escrow.min_hold_period {
-                                return Err(Error::Escrow(EscrowError::ReleaseOnHoldPeriod));
+                            if current_time < escrow.hold_period_until {
+                                return Err(Error::Escrow(EscrowError::HoldPeriodActive));
                             }
                         }
                         escrow.status = EscrowStatus::Released;
@@ -7783,7 +7788,7 @@ impl EscrowContract {
 
         let current_time = env.ledger().timestamp();
         if current_time < action.executable_after {
-            return Err(Error::Action(ActionError::NotReady));
+            return Err(Error::Escrow(EscrowError::TimelockNotElapsed));
         }
         if current_time > action.expires_at {
             return Err(Error::Escrow(EscrowError::InvalidStatus));
