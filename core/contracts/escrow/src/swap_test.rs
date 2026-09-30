@@ -18,6 +18,17 @@ impl MockSwapOracle {
     pub fn set_rate(env: Env, rate: i128) {
         env.storage().instance().set(&0u32, &rate);
     }
+
+    pub fn get_updated_at(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<u32, u64>(&1u32)
+            .unwrap_or_else(|| env.ledger().timestamp())
+    }
+
+    pub fn set_updated_at(env: Env, timestamp: u64) {
+        env.storage().instance().set(&1u32, &timestamp);
+    }
 }
 
 #[test]
@@ -397,4 +408,41 @@ fn swap_cannot_be_claimed_by_non_participant() {
     // Non-participant tries to execute swap: fails with Unauthorized
     let res = client.try_execute_escrow_swap(&non_participant, &escrow_id);
     assert_eq!(res, Err(Ok(Error::Basic(BasicError::Unauthorized))));
+}
+
+#[test]
+fn test_escrow_swap_rejects_stale_oracle_price() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token = env.register_stellar_asset_contract(admin.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&customer, &1_000_000);
+    let target_token = Address::generate(&env);
+    let oracle = env.register(MockSwapOracle, ());
+    let oracle_client = MockSwapOracleClient::new(&env, &oracle);
+
+    client.initialize(&admin);
+
+    let escrow_id = client.create_escrow(
+        &customer, &merchant, &1000_i128, &token, &1000_u64, &0_u64, &0_u64, &false,
+    );
+
+    oracle_client.set_rate(&15_000_000_i128);
+    // Oracle price was last updated more than 300 seconds ago.
+    oracle_client.set_updated_at(&(1_000_000u64 - 301));
+
+    client.configure_escrow_swap(&merchant, &escrow_id, &target_token, &1400_i128, &oracle);
+
+    let res = client.try_execute_escrow_swap(&merchant, &escrow_id);
+    assert_eq!(
+        res,
+        Err(Ok(Error::Action(ActionError::StaleOraclePrice)))
+    );
 }
