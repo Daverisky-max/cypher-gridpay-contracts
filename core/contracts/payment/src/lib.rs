@@ -118,32 +118,59 @@ pub enum DataKey {
 #[repr(u32)]
 #[contracterror]
 pub enum BasicError {
+    /// Admin authentication required. The caller is not a registered admin.
     Unauthorized = 100,
+    /// Payment metadata exceeds the maximum allowed size.
     MetadataTooLarge = 101,
+    /// Payment notes exceed the maximum allowed size.
     NotesTooLarge = 102,
+    /// Unsupported currency specified. Use XLM, USDC, USDT, BTC, or ETH.
     InvalidCurrency = 103,
+    /// Batch size is invalid. Use a batch size between 1 and 100.
     InvalidBatchSize = 104,
+    /// Some payments in the batch failed. Check individual payment statuses.
     BatchPartialFailure = 105,
+    /// Rate limit exceeded for this address. Wait for the rate limit window to reset.
     RateLimitExceeded = 106,
+    /// Daily volume limit exceeded. Wait for the next day or contact admin.
     DailyVolumeExceeded = 107,
+    /// Address has been flagged for suspicious activity. Contact support to resolve.
     AddressFlagged = 108,
+    /// Address is already flagged. No action needed.
     AddressAlreadyFlagged = 109,
+    /// Payment amount exceeds the maximum allowed. Reduce payment amount.
     AmountExceedsLimit = 110,
+    /// Multi-signature not initialized. Initialize multi-sig configuration first.
     MultiSigNotInitialized = 111,
+    /// Not enough admin signatures. Collect the required number of admin signatures.
     InsufficientAdmins = 112,
+    /// Caller is not an admin. Use an admin account.
     NotAnAdmin = 113,
+    /// Admin has already approved this proposal. No action needed.
     AlreadyApproved = 114,
+    /// Price oracle call failed. Retry or check oracle configuration.
     OracleCallFailed = 115,
+    /// Contract is paused. Wait for the contract to be unpaused.
     ContractPaused = 116,
+    /// This function is paused. Use an alternative function.
     FunctionPaused = 117,
+    /// Tier threshold configuration is invalid. Fix tier threshold values.
     InvalidTierThresholds = 118,
+    /// Oracle price feed is stale. Wait for the next oracle update.
     OracleFeedStale = 119,
+    /// Oracle is not configured. Configure the oracle first.
     OracleNotConfigured = 120,
+    /// Payment amount is invalid. Use a positive amount.
     InvalidAmount = 121,
+    /// Verification level not found. Use a valid verification level.
     VerificationLevelNotFound = 122,
+    /// Tier limits are not configured. Configure tier limits first.
     TierLimitsNotConfigured = 123,
+    /// Invalid interval specified. Use a valid interval.
     InvalidInterval = 124,
+    /// Invalid basis points value. Use bps between 0 and 10000.
     InvalidBps = 125,
+    /// Schema is already at the target version. No migration needed.
     SchemaAlreadyAtTarget = 126,
     // Issue #88: a data migration step failed, so the schema version must
     // not be bumped (the whole transaction is reverted).
@@ -154,30 +181,55 @@ pub enum BasicError {
 #[repr(u32)]
 #[contracterror]
 pub enum PaymentError {
+    /// Payment not found. Verify the payment ID.
     NotFound = 200,
+    /// Payment is not in a valid status for this operation.
     InvalidStatus = 201,
+    /// Payment has already been processed. No action needed.
     AlreadyProcessed = 202,
+    /// Payment has expired. Create a new payment.
     Expired = 203,
+    /// Payment has not expired yet. Wait for expiration.
     NotExpired = 204,
+    /// Payment has no expiration set.
     NoExpiration = 205,
+    /// Token transfer failed. Check token balance and allowances.
     TransferFailed = 206,
+    /// Refund amount exceeds the original payment amount.
     RefundExceedsPayment = 207,
+    /// Payment is not yet due. Wait for the scheduled time.
     NotYetDue = 208,
+    /// Scheduled payment has been cancelled.
     ScheduledPaymentCancelled = 209,
+    /// Metadata has already been set for this payment.
     MetadataAlreadySet = 210,
+    /// Metadata not found for this payment.
     MetadataNotFound = 211,
+    /// Hash mismatch. The provided hash does not match the stored hash.
     HashMismatch = 212,
+    /// Payment has already been fully paid.
     AlreadyFullyPaid = 213,
+    /// Installment amount exceeds the remaining balance.
     InstallmentExceedsRemaining = 214,
+    /// Partial payment not found. Verify the partial payment ID.
     PartialPaymentNotFound = 215,
+    /// Merchant rate limit exceeded. Wait for the rate limit window to reset.
     MerchantRateLimitExceeded = 216,
+    /// Amount rate limit exceeded. Reduce the payment amount.
     AmountRateLimitExceeded = 217,
+    /// Payout schedule not found. Configure a payout schedule first.
     PayoutScheduleNotFound = 218,
+    /// Payout is not yet due. Wait for the scheduled time.
     PayoutNotYetDue = 219,
+    /// Nothing to settle. The payment has no outstanding balance.
     NothingToSettle = 220,
+    /// Billing overflow. The billing amount exceeds the maximum allowed.
     BillingOverflow = 221,
+    /// Invalid line item. Check the line item data.
     InvalidLineItem = 222,
+    /// Invalid scheduled time. Use a future timestamp.
     InvalidScheduleTime = 223,
+    /// Token not allowed. Use an allowed token.
     TokenNotAllowed = 224,
 }
 
@@ -223,48 +275,89 @@ pub enum ProposalError {
 #[repr(u32)]
 #[contracterror]
 pub enum FeatureError {
+    /// Escrow mapping not found. Create the escrow mapping first.
     EscrowMappingNotFound = 500,
+    /// Escrow bridge operation failed. Retry or check bridge configuration.
     EscrowBridgeFailed = 501,
+    /// Fee configuration not found. Configure fees first.
     FeeConfigNotFound = 502,
+    /// Insufficient fees accumulated. Wait for more fees to accumulate.
     InsufficientFees = 503,
+    /// Condition not met. Fulfill the required condition.
     ConditionNotMet = 504,
+    /// Condition has already been evaluated. No action needed.
     ConditionAlreadyEvaluated = 505,
+    /// Auto-escrow rule not found. Configure the rule first.
     AutoEscrowRuleNotFound = 506,
+    /// Auto-escrow amount is below the minimum threshold.
     AutoEscrowBelowMinimum = 507,
+    /// Auto-escrow has already been triggered. No action needed.
     AutoEscrowAlreadyTriggered = 508,
+    /// Condition evaluation failed. Check the condition configuration.
     ConditionEvaluationFailed = 509,
+    /// Condition not met at runtime. Check the condition logic.
     ConditionRuntimeNotMet = 510,
+    /// Invalid fee configuration. Fix the fee config values.
     InvalidFeeConfig = 511,
+    /// Payment channel not found. Verify the channel ID.
     ChannelNotFound = 512,
+    /// Invalid signature. The signature does not match the expected value.
     InvalidSignature = 513,
+    /// Invalid nonce. Use a nonce greater than the current sequence.
     InvalidNonce = 514,
+    /// Payment channel is closed. Open a new channel.
     ChannelClosed = 515,
+    /// Payment channel has expired. Open a new channel.
     ChannelExpired = 516,
+    /// Payment channel has not expired yet. Wait for expiration.
     ChannelNotExpired = 517,
+    /// Invalid split shares. The shares do not sum to 100%.
     InvalidSplitShares = 518,
+    /// Too many recipients. Reduce the number of recipients.
     TooManyRecipients = 519,
+    /// Invalid counterparty. Use a valid counterparty address.
     InvalidCounterparty = 540,
+    /// Split configuration not found. Configure splitting first.
     SplitConfigNotFound = 520,
+    /// Split has already been executed. No action needed.
     SplitAlreadyExecuted = 521,
+    /// Loyalty program not configured. Configure loyalty first.
     LoyaltyNotConfigured = 522,
+    /// Insufficient loyalty points. Earn more points first.
     InsufficientPoints = 523,
+    /// Loyalty points have expired. Earn new points.
     PointsExpired = 524,
+    /// No fees to sweep. Accumulate fees first.
     NothingToSweep = 525,
+    /// Sweep recipient not set. Set the sweep recipient first.
     SweepRecipientNotSet = 526,
+    /// Spend limit exceeded. Reduce the payment amount or increase the limit.
     SpendLimitExceeded = 527,
+    /// Spend limit not configured. Configure spend limits first.
     SpendLimitNotConfigured = 528,
+    /// Settlement not ready. Wait for settlement conditions to be met.
     SettlementNotReady = 529,
+    /// Finality configuration not found. Configure finality first.
     FinalityConfigNotFound = 530,
+    /// Settlement has already been finalized. No action needed.
     SettlementAlreadyFinalized = 531,
+    /// Rebate threshold not met. Increase the payment amount.
     RebateThresholdNotMet = 532,
+    /// Rebate has already been claimed. No action needed.
     RebateAlreadyClaimed = 533,
+    /// Rebate configuration not found. Configure rebates first.
     RebateConfigNotFound = 534,
+    /// Forward configuration not found. Configure forwarding first.
     ForwardConfigNotFound = 535,
+    /// Forward loop detected. Check the forwarding configuration.
     ForwardLoop = 536,
+    /// Invalid forward basis points. Use bps between 0 and 10000.
     InvalidForwardBps = 537,
+    /// Sender is the recipient. Use a different recipient.
     SenderIsRecipient = 538,
+    /// Amount is below the minimum split amount. Increase the amount.
     BelowMinSplitAmount = 539,
-    // Issue #385: claimed settlement amounts must sum exactly to the channel deposit.
+    /// Balance sum mismatch. The settlement amounts do not sum to the deposit.
     BalanceSumMismatch = 541,
 }
 
