@@ -124,82 +124,146 @@ pub enum DataKey {
     ReleaseThresholdBps(u64),
 }
 
+/// Administrative, multi-sig, and protocol configuration errors for EscrowContract.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum BasicError {
+    /// Caller is not authorized for this escrow operation. Resolution: sign with the participant, arbiter, or admin key.
     Unauthorized = 100,
+    /// Caller is not a designated administrator. Resolution: invoke using an active admin account.
     NotAnAdmin = 101,
+    /// Admin has already submitted an approval for this proposal. Resolution: wait for remaining required approvals.
     AlreadyApproved = 102,
+    /// Contract is globally paused or functionality is suspended. Resolution: wait for admin to resume contract.
     ContractPaused = 103,
+    /// Approver has already voted or signed on this action. Resolution: cannot register duplicate approval.
     DuplicateApproval = 104,
+    /// Multi-signature configuration has not been set up. Resolution: initialize contract multi-sig config.
     MultiSigNotInitialized = 105,
+    /// Storage migration has not been initiated. Resolution: start migration before executing step migrations.
     MigrationNotStarted = 106,
+    /// Storage migration has already been completed to target schema. Resolution: no further migration needed.
     AlreadyMigrated = 107,
+    /// Escrow participant or beneficiary address was not found. Resolution: verify participant address.
     ParticipantNotFound = 108,
+    /// Merkle inclusion proof verification failed. Resolution: provide valid proof path and committed root.
     InvalidMerkleProof = 109,
+    /// Merkle tree root has already been committed and cannot be overwritten. Resolution: root is immutable once set.
     RootAlreadyCommitted = 110,
+    /// Fee or split basis points exceed 10,000 (100%). Resolution: provide basis points between 0 and 10,000.
     InvalidBps = 111,
+    /// Total admin count is below required signature threshold. Resolution: add additional admins before updating threshold.
     InsufficientAdmins = 112,
+    /// Supplied address is malformed or invalid. Resolution: provide valid 32-byte Stellar account or contract address.
     InvalidAddress = 113,
+    /// Storage schema is already at or above the requested version. Resolution: specify newer version for migration.
     SchemaAlreadyAtTarget = 114,
 }
 
+/// Errors relating to escrow creation, status transitions, vesting, and expiration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum EscrowError {
+    /// Escrow record ID not found in storage. Resolution: verify escrow ID before calling functions.
     NotFound = 200,
+    /// Escrow is in an invalid status for the requested transition. Resolution: ensure escrow is in required status.
     InvalidStatus = 201,
+    /// Escrow funds have already been released or refunded. Resolution: no-op; escrow is already completed.
     AlreadyProcessed = 202,
+    /// Release conditions or milestone requirements have not been satisfied yet. Resolution: complete pending milestones.
     ReleaseNotYetAvailable = 203,
+    /// Inactivity or dispute resolution timeout has not been reached. Resolution: wait until timeout deadline passes.
     TimeoutNotReached = 204,
+    /// Escrow release is in a mandatory cooling/hold period. Resolution: wait until hold period expires.
     ReleaseOnHoldPeriod = 205,
+    /// Vesting schedule parameters (cliff, duration, intervals) are invalid. Resolution: provide non-zero duration and valid cliff.
     InvalidVestingSchedule = 206,
+    /// Vesting cliff timestamp has not arrived yet. Resolution: wait until vesting cliff period has elapsed.
     CliffPeriodNotPassed = 207,
+    /// Milestone has already been claimed and released. Resolution: release remaining unreleased milestones.
     MilestoneAlreadyReleased = 208,
+    /// Escrow cannot be claimed as expired before expiry timestamp. Resolution: wait until expiration timestamp has passed.
     EscrowNotExpired = 209,
+    /// Action cannot be performed because escrow has already expired. Resolution: claim refund or create new escrow.
     EscrowAlreadyExpired = 210,
+    /// Expiration timestamp is earlier than the earliest release timestamp. Resolution: set expiry after release schedule.
     ExpiryBeforeRelease = 211,
+    /// Escrow template ID not found. Resolution: register template via create_template() first.
     TemplateNotFound = 212,
+    /// Escrow template is currently deactivated. Resolution: activate template or use active template.
     TemplateInactive = 213,
+    /// Sub-account identifier not found within escrow record. Resolution: verify sub-account ID.
     SubAccountNotFound = 214,
+    /// Funds for this sub-account have already been released. Resolution: cannot release sub-account funds twice.
     SubAccountAlreadyReleased = 215,
+    /// Sum of sub-account allocations exceeds total escrow funding. Resolution: ensure sub-account allocations <= total.
     SubAccountFundingExceedsEscrow = 216,
+    /// Conditional escrow dependency rule not found. Resolution: register conditional escrow mapping before execution.
     ConditionalEscrowNotFound = 217,
+    /// Parent escrow in hierarchical dependency tree was not found. Resolution: create parent escrow first.
     ParentEscrowNotFound = 218,
+    /// Child escrows in hierarchy have not all been resolved. Resolution: resolve child escrows before parent release.
     ChildrenNotResolved = 219,
+    /// Escrow nesting depth exceeds maximum allowed tree depth. Resolution: flatten escrow hierarchy structure.
     MaxHierarchyDepth = 220,
+    /// Number of items in batch operation exceeds batch ceiling. Resolution: reduce batch size under limit.
     BatchTooLarge = 221,
+    /// Contract renewal feature is disabled for this escrow. Resolution: enable renewal at creation time.
     RenewalDisabled = 222,
+    /// Maximum number of extension renewals has been reached. Resolution: finalize escrow; cannot extend further.
     MaxRenewalsReached = 223,
+    /// New expiration timestamp must be strictly later than current expiry. Resolution: specify later timestamp.
     NewExpiryNotAfterCurrent = 224,
+    /// Requested renewal duration is below minimum allowed renewal period. Resolution: extend by at least min_period.
     RenewalPeriodTooShort = 225,
+    /// Requested renewal duration exceeds maximum allowed renewal ceiling. Resolution: extend by less than max_period.
     RenewalPeriodTooLong = 226,
+    /// Approval threshold configuration value is invalid. Resolution: provide threshold between 1 and total signers.
     InvalidThreshold = 227,
+    /// A succession plan is already registered for this admin/party. Resolution: cancel existing plan before registering new.
     SuccessionPlanExists = 228,
+    /// Clawback delay parameter is below protocol minimum safety delay. Resolution: increase clawback delay.
     ClawbackDelayTooShort = 229,
 }
 
+/// Errors relating to disputes, arbitration, evidence, observers, and token swaps.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u32)]
 #[contracterror]
 pub enum ActionError {
+    /// Escrow is not ready for the requested action. Resolution: verify state prerequisites before invoking.
     NotReady = 300,
+    /// Escrow must be in disputed state to perform this dispute resolution action. Resolution: raise dispute first.
     NotDisputed = 301,
+    /// Address is already registered as an observer on this escrow. Resolution: observer is already active.
     ObserverAlreadyAdded = 302,
+    /// Observer address not found on this escrow. Resolution: register observer before performing observer actions.
     ObserverNotFound = 303,
+    /// Milestone vesting acceleration would breach the maximum acceleration cap. Resolution: lower acceleration amount.
     AccelerationLimitExceeded = 304,
+    /// Escrow beneficiary transfer is disabled or disallowed for this role. Resolution: ensure transfer rights are enabled.
     TransferNotAllowed = 305,
+    /// New beneficiary address cannot be identical to current beneficiary. Resolution: specify different new address.
     SameBeneficiary = 306,
+    /// Conditional escrow trigger has already been evaluated. Resolution: cannot re-evaluate finalized condition.
     ConditionAlreadyEvaluated = 307,
+    /// Staleness threshold parameter is not configured. Resolution: configure stale threshold before checking staleness.
     StaleThresholdNotConfigured = 308,
+    /// Token swap configuration for automatic conversion not found. Resolution: configure swap route parameters.
     SwapConfigNotFound = 309,
+    /// Slippage exceeded: swap output amount is below minimum acceptable output. Resolution: increase slippage tolerance.
     SwapOutputBelowMinimum = 310,
+    /// Token swap has already been executed for this escrow. Resolution: cannot execute duplicate swap.
     SwapAlreadyExecuted = 311,
+    /// Number of escrows in batch release exceeds maximum batch release limit. Resolution: chunk batch into smaller sizes.
     BatchReleaseSizeLimitExceeded = 312,
+    /// Evidence submission window has expired. Resolution: submit dispute evidence before deadline passes.
     EvidenceDeadlinePassed = 313,
+    /// Multi-party approval threshold has not been reached. Resolution: collect required signatures before executing release.
     ApprovalsThresholdNotMet = 314,
+    /// Deposited collateral balance is insufficient for this operation. Resolution: fund additional collateral to escrow.
     InsufficientCollateral = 315,
 }
 
@@ -647,6 +711,15 @@ pub struct EvidenceDeadlineExceeded {
     pub escrow_id: u64,
     pub deadline: u64,
     pub submitted_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceDeadlineExtended {
+    pub escrow_id: u64,
+    pub previous_deadline: u64,
+    pub new_deadline: u64,
+    pub extended_at: u64,
 }
 
 #[contractevent]
@@ -1604,6 +1677,7 @@ impl EscrowContract {
     /// # Returns
     /// Nothing.
     pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
         if env
             .storage()
             .instance()
@@ -4145,8 +4219,8 @@ impl EscrowContract {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
 
-        // Check evidence submission deadline
-        if let Some(deadline) = escrow.evidence_deadline {
+        // Check evidence submission deadline and apply grace period extension if submitted close to deadline
+        if let Some(mut deadline) = escrow.evidence_deadline {
             let current_time = env.ledger().timestamp();
             if current_time > deadline {
                 EvidenceDeadlineExceeded {
@@ -4156,6 +4230,28 @@ impl EscrowContract {
                 }
                 .publish(&env);
                 return Err(Error::Action(ActionError::EvidenceDeadlinePassed));
+            }
+
+            // Issue #108: Grace period front-running mitigation
+            // If evidence is submitted within 2 hours (7200s) of deadline, extend by 24 hours (86400s)
+            const GRACE_TRIGGER_WINDOW: u64 = 7200; // 2 hours
+            const GRACE_EXTENSION_DURATION: u64 = 86400; // 24 hours
+            if deadline.saturating_sub(current_time) <= GRACE_TRIGGER_WINDOW {
+                let previous_deadline = deadline;
+                deadline = deadline.saturating_add(GRACE_EXTENSION_DURATION);
+                let mut updated_escrow = escrow.clone();
+                updated_escrow.evidence_deadline = Some(deadline);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &updated_escrow);
+
+                EvidenceDeadlineExtended {
+                    escrow_id,
+                    previous_deadline,
+                    new_deadline: deadline,
+                    extended_at: current_time,
+                }
+                .publish(&env);
             }
         }
 
@@ -4472,8 +4568,8 @@ impl EscrowContract {
 
         let now = env.ledger().timestamp();
 
-        // Enforce the same evidence deadline as the single-item path.
-        if let Some(deadline) = escrow.evidence_deadline {
+        // Enforce evidence deadline and apply grace period extension if submitted close to deadline
+        if let Some(mut deadline) = escrow.evidence_deadline {
             if now > deadline {
                 EvidenceDeadlineExceeded {
                     escrow_id,
@@ -4482,6 +4578,27 @@ impl EscrowContract {
                 }
                 .publish(&env);
                 return Err(Error::Action(ActionError::EvidenceDeadlinePassed));
+            }
+
+            // Issue #108: Grace period front-running mitigation
+            const GRACE_TRIGGER_WINDOW: u64 = 7200; // 2 hours
+            const GRACE_EXTENSION_DURATION: u64 = 86400; // 24 hours
+            if deadline.saturating_sub(now) <= GRACE_TRIGGER_WINDOW {
+                let previous_deadline = deadline;
+                deadline = deadline.saturating_add(GRACE_EXTENSION_DURATION);
+                let mut updated_escrow = escrow.clone();
+                updated_escrow.evidence_deadline = Some(deadline);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &updated_escrow);
+
+                EvidenceDeadlineExtended {
+                    escrow_id,
+                    previous_deadline,
+                    new_deadline: deadline,
+                    extended_at: now,
+                }
+                .publish(&env);
             }
         }
         let page_num: u32 = env
@@ -7729,8 +7846,11 @@ impl EscrowContract {
     /// # Returns
     /// Results in `Ok(())` on success or `Err(Error)` on failure.
     ///
-    /// # Errors
-    /// Returns `Err(Error)` when the operation cannot be completed.
+    /// Alias for pause_contract.
+    pub fn pause(env: Env, admin: Address, reason: String) -> Result<(), Error> {
+        Self::pause_contract(env, admin, reason)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) -> Result<(), Error> {
         admin.require_auth();
         let config: MultiSigConfig = env
