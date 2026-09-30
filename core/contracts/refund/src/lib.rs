@@ -4,6 +4,8 @@ use soroban_sdk::{
     BytesN, Env, FromVal, IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
 
+pub mod storage;
+
 #[cfg(test)]
 extern crate std;
 
@@ -127,6 +129,20 @@ pub enum ArbitrationKey {
     // Uniqueness guard: maps refund_id -> case_id so the same refund
     // cannot be escalated into multiple parallel arbitration cases.
     CaseByRefund(u64),
+    // Time-decay settings for inactive arbitrators' reputation scores
+    ReputationDecayConfig,
+}
+
+// Protocol-level fee configuration and accounting.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum ConfigKey {
+    // Protocol maintenance fee (bps) deducted from arbitration awards
+    ArbitrationProtocolFeeBps,
+    // Protocol fees collected and held by the contract, per token
+    AccumulatedFees(Address),
+    // Marks a refund whose approval was awarded by arbitration
+    ArbitrationAward(u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -250,84 +266,133 @@ pub enum RefundReasonCode {
 // single `Error` type so every existing `Result<_, Error>` signature and `?`
 // call site is unaffected. Mirrors the same pattern already used for
 // `Error`/`BasicError`/`EscrowError`/`ActionError` in contracts/escrow/src/lib.rs.
+/// Core refund request validation, policy inheritance, and execution errors.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CoreError {
+    /// Refund amount is zero or negative. Resolution: supply refund amount greater than zero.
     InvalidAmount = 1,
+    /// Refund request ID not found in storage. Resolution: verify refund request ID.
     RefundNotFound = 2,
+    /// Caller is not authorized for this refund operation. Resolution: invoke with merchant, buyer, or admin signature.
     Unauthorized = 3,
+    /// Referenced payment ID does not exist or is malformed. Resolution: verify payment ID against payment contract.
     InvalidPaymentId = 4,
+    /// Refund request is in an invalid status for this operation. Resolution: check current refund status before acting.
     InvalidStatus = 7,
+    /// Refund request has already been processed or resolved. Resolution: no-op; refund already completed.
     AlreadyProcessed = 8,
+    /// Requested refund exceeds total original payment amount. Resolution: request amount <= original payment.
     RefundExceedsPayment = 9,
+    /// Cumulative refunds for this payment exceed total payment amount. Resolution: ensure total refunds <= payment.
     TotalRefundsExceedPayment = 10,
+    /// Time allowed for requesting a refund has elapsed. Resolution: file dispute or appeal if within appeal window.
     RefundWindowExpired = 11,
+    /// Refund amount exceeds the maximum allowed by merchant policy. Resolution: adjust refund under policy cap.
     RefundExceedsPolicy = 12,
+    /// Refund policy configuration not found for merchant. Resolution: register policy via set_merchant_policy().
     PolicyNotFound = 13,
+    /// Merchant refund policy is currently deactivated. Resolution: activate policy before processing requests.
     PolicyInactive = 14,
+    /// Required arbitrator quorum threshold not reached. Resolution: gather additional arbitrator votes.
     QuorumNotReached = 15,
+    /// Caller is not a registered dispute arbitrator. Resolution: invoke using authorized arbitrator address.
     NotArbitrator = 16,
+    /// Refund contract is currently paused by admin. Resolution: wait for admin to resume contract operations.
     ContractPaused = 17,
+    /// Specific refund entry point is currently paused. Resolution: wait for function to be unpaused.
     FunctionPaused = 18,
+    /// Dispute response timeout has not passed yet. Resolution: wait until timeout deadline expires before escalating.
     CaseNotTimedOut = 19,
+    /// Batch refund array size exceeds maximum permitted items. Resolution: submit batch with fewer items.
     BatchRefundTooLarge = 20,
-    // Issue #138: Refund policy inheritance errors
+    /// Circular dependency detected in refund policy inheritance chain. Resolution: fix parent policy references.
     CircularInheritance = 21,
+    /// Policy inheritance chain exceeds maximum nesting depth. Resolution: flatten policy inheritance hierarchy.
     MaxInheritanceDepth = 22,
+    /// Cannot appeal a refund request that was not rejected. Resolution: appeals only valid for rejected requests.
     RefundNotRejected = 23,
+    /// Appeal submission window has expired. Resolution: appeals must be filed within appeal_window_seconds.
     AppealWindowExpired = 24,
+    /// An appeal has already been filed for this refund request. Resolution: cannot file multiple appeals on one request.
     AppealAlreadyFiled = 25,
+    /// Rate limit reached for refund requests. Resolution: wait until rate limit period resets before submitting.
     RefundRateLimitExceeded = 26,
+    /// Linked payment contract address is unconfigured. Resolution: set payment contract address via admin entry point.
     PaymentContractNotSet = 27,
+    /// Caller does not own the payment being refunded. Resolution: invoke using payment payer or merchant address.
     PaymentOwnershipMismatch = 28,
+    /// Circuit breaker tripped due to excessive refund volume. Resolution: review alerts and reset circuit breaker.
     CircuitBreakerTripped = 29,
+    /// Protocol fee basis points configuration is invalid. Resolution: provide fee bps between 0 and 10,000.
     InvalidFeeConfig = 30,
+    /// Treasury fees collected are insufficient for requested operation. Resolution: ensure adequate accumulated fees.
     InsufficientTreasuryFees = 31,
+    /// Automated approval threshold exceeds protocol ceiling. Resolution: lower auto-approve threshold below ceiling.
     AutoApproveThresholdExceedsCeiling = 32,
+    /// Mandatory cooldown period between customer refunds is active. Resolution: wait until cooldown period elapses.
     RefundCooldownActive = 33,
 }
 
+/// Extended refund features: hooks, vouchers, eligibility, fraud detection, and admin rotation.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExtError {
+    /// Arbitrator address not found in registered arbitrator list. Resolution: register arbitrator before assigning cases.
     ArbitratorNotFound = 34,
+    /// Minimum score threshold for automated risk assessment is invalid. Resolution: specify threshold within 0-100.
     InvalidScoreThreshold = 35,
+    /// Automated refund rule trigger not found. Resolution: configure auto-refund rule before triggering.
     AutoRefundTriggerNotFound = 36,
+    /// An identical automated refund trigger is already registered. Resolution: cannot register duplicate trigger.
     DuplicateAutoRefundTrigger = 37,
+    /// Address is flagged on fraud detection watchlist. Resolution: address blocked pending fraud clearance.
     AddressFlaggedForFraud = 38,
+    /// Fraud signal record for transaction not found. Resolution: register fraud signal before evaluation.
     FraudSignalNotFound = 40,
-    // Issue #144: Notification hook errors
+    /// Notification hook subscriber not found. Resolution: subscribe hook before triggering events.
     HookNotFound = 41,
+    /// Maximum number of hooks registered for this event reached. Resolution: remove unused hooks before adding new.
     MaxHooksPerEventReached = 42,
+    /// Caller does not own the registered notification hook. Resolution: only hook owner can manage hook.
     HookNotOwnedBySubscriber = 43,
-    // Issue #373: Invalid notification hook subscriber address
-    // (moved from 58, which collided with SchemaAlreadyAtTarget)
+    /// Hook callback contract address is invalid. Resolution: provide valid contract address for notification hook.
     InvalidHookAddress = 51,
-    // Issue #148: Customer eligibility errors
+    /// Customer account is blocked from receiving refunds. Resolution: resolve customer block via merchant support.
     CustomerBlockedFromRefund = 44,
+    /// Customer eligibility entry not found in whitelist. Resolution: register customer eligibility record.
     EligibilityEntryNotFound = 45,
+    /// Refund template identifier not found in registry. Resolution: create template via create_template() first.
     TemplateNotFound = 46,
+    /// Refund template is currently deactivated. Resolution: activate template before instantiation.
     TemplateInactive = 47,
-    // Issue #XXX: Payment refund cap errors
+    /// Total count of refunds for this payment reached configured cap. Resolution: cannot issue further refunds.
     RefundCountCapExceeded = 48,
+    /// Total refund amount for this payment reached configured cap. Resolution: cannot exceed payment refund ceiling.
     RefundAmountCapExceeded = 49,
+    /// Refund token is not supported by contract asset registry. Resolution: refund in original payment token.
     UnsupportedRefundToken = 50,
-    // New specific errors
+    /// Store credit or refund voucher ID not found. Resolution: verify voucher ID before redeeming.
     VoucherNotFound = 52,
+    /// Store credit voucher has expired past its validity timestamp. Resolution: cannot redeem expired voucher.
     VoucherExpired = 53,
+    /// Store credit voucher has already been redeemed. Resolution: cannot redeem voucher more than once.
     VoucherAlreadyRedeemed = 54,
+    /// Evidence for this dispute has already been submitted by party. Resolution: evidence submission is final.
     EvidenceAlreadySubmitted = 55,
+    /// Dispute case has already been escalated to senior arbitration. Resolution: await senior arbitrator ruling.
     CaseAlreadyEscalated = 56,
-    // Issue #370: Customer tier policy errors
+    /// Tier-specific refund policy not found for customer tier. Resolution: configure tier policy before evaluation.
     TierPolicyNotFound = 57,
+    /// Storage schema is already at or above target version. Resolution: specify newer version for migration.
     SchemaAlreadyAtTarget = 58,
-    // Issue #389: two-step admin rotation errors
+    /// No pending administrator address in two-step rotation process. Resolution: initiate nomination via nominate_admin().
     NoPendingAdmin = 59,
+    /// Caller is not the nominated pending administrator. Resolution: accept_admin() must be called by nominee.
     NotPendingAdmin = 60,
-    // Issue #70: cross-contract payment-state verification errors
-    PaymentContractCallFailed = 61,
-    PaymentNotCompleted = 62,
-    PaymentContractUnavailable = 63,
+    // Issue #88: a data migration step failed, so the schema version must not
+    // be bumped (the whole transaction is reverted).
+    SchemaMigrationFailed = 61,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -392,15 +457,23 @@ impl TryFromVal<Env, Val> for Error {
     }
 }
 
+/// Issue #72: dashboard-facing lifecycle events.
+///
+/// Every event carries the `customer`, `merchant`, `refund_id` and the
+/// canonical `reason_code` so customer and merchant dashboards can render
+/// refund requests, approvals, denials and appeals in real time without
+/// re-reading contract state.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundRequested {
+pub struct RefundRequestedEvent {
     pub refund_id: u64,
     pub payment_id: u64,
-    pub merchant: Address,
     pub customer: Address,
+    pub merchant: Address,
     pub amount: i128,
     pub token: Address,
+    pub reason_code: RefundReasonCode,
+    pub requested_at: u64,
 }
 
 #[contractevent]
@@ -443,18 +516,25 @@ pub struct TriggerRegistered {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundApproved {
+pub struct RefundApprovedEvent {
     pub refund_id: u64,
     pub payment_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
     pub amount: i128,
+    pub reason_code: RefundReasonCode,
     pub approved_by: Address,
     pub approved_at: u64,
 }
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundRejected {
+pub struct RefundDeniedEvent {
     pub refund_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub reason_code: RefundReasonCode,
     pub rejected_by: Address,
     pub rejected_at: u64,
     pub rejection_reason: String,
@@ -462,10 +542,14 @@ pub struct RefundRejected {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppealFiled {
+pub struct AppealFiledEvent {
     pub appeal_id: u64,
     pub refund_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
     pub appellant: Address,
+    pub reason_code: RefundReasonCode,
+    pub filed_at: u64,
 }
 
 #[contractevent]
@@ -577,6 +661,36 @@ pub struct ArbitratorReputation {
     pub avg_resolution_time: u64,
     pub score: i128,
     pub last_active: u64,
+}
+
+/// Reputation time-decay settings: a positive score loses `decay_bps` for
+/// every full `inactivity_period_secs` the arbitrator has been inactive,
+/// once inactivity exceeds one period.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct ReputationDecayConfig {
+    pub decay_bps: u32,
+    pub inactivity_period_secs: u64,
+}
+
+// Defaults: 10% decay per 60 days of inactivity.
+pub const DEFAULT_REPUTATION_DECAY_BPS: u32 = 1_000;
+pub const DEFAULT_REPUTATION_INACTIVITY_SECS: u64 = 60 * 24 * 60 * 60;
+// Cap on compounded periods; after this many the score is effectively zero.
+const MAX_REPUTATION_DECAY_PERIODS: u64 = 64;
+
+// Default protocol maintenance fee on arbitration awards: 2%.
+pub const DEFAULT_ARBITRATION_PROTOCOL_FEE_BPS: u32 = 200;
+// Upper bound for the arbitration protocol fee: 10%.
+pub const MAX_ARBITRATION_PROTOCOL_FEE_BPS: u32 = 1_000;
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolFeeCollected {
+    pub refund_id: u64,
+    pub token: Address,
+    pub fee_amount: i128,
+    pub net_award: i128,
 }
 
 #[contractevent]
@@ -724,6 +838,27 @@ pub enum EligibilityKey {
     MerchantCustomerIndex(Address, u64),
     /// Total number of eligibility entries for a merchant.
     MerchantCustomerCount(Address),
+    /// Admin-assigned standing of a merchant. Absent means `Active`.
+    MerchantStatus(Address),
+}
+
+/// Standing of a merchant with the platform. Only `Active` merchants may
+/// request or process refunds; suspended or sanctioned merchants are blocked
+/// so they cannot issue refunds that are not backed by good standing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum MerchantStatus {
+    Active,
+    Suspended,
+    Sanctioned,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantStatusUpdated {
+    pub merchant: Address,
+    pub status: MerchantStatus,
+    pub updated_by: Address,
 }
 
 #[contractevent]
@@ -1462,6 +1597,33 @@ pub struct AdminRotationAccepted {
     pub new_admin: Address,
 }
 
+// Gas estimation constants used by the dry-run migration helper (Issue #89).
+// These model the dominant cost drivers of a schema migration: a fixed base
+// cost for opening the migration plus a per-record cost for converting each
+// stored record to the new schema layout.
+const MIGRATION_BASE_GAS: u64 = 50_000;
+const MIGRATION_GAS_PER_RECORD: u64 = 1_500;
+
+/// Read-only impact report produced by [`RefundContract::dry_run_migrate_schema`].
+///
+/// The report lets admins estimate the cost and blast radius of a schema
+/// migration on mainnet or testnet without committing irreversible storage
+/// changes.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MigrationReport {
+    /// Schema version recorded before the migration.
+    pub current_version: u32,
+    /// Schema version the migration would move storage to.
+    pub target_version: u32,
+    /// Number of stored records that would be converted by the migration.
+    pub converted_records: u64,
+    /// Estimated gas, in instructions, the migration would consume.
+    pub gas_estimate: u64,
+    /// Always `true` for dry-run reports, distinguishing them from real runs.
+    pub dry_run: bool,
+}
+
 #[contract]
 pub struct RefundContract;
 
@@ -1469,6 +1631,17 @@ pub struct RefundContract;
 impl RefundContract {
     const BATCH_DECISION_LIMIT: u32 = 50;
     const INITIAL_SCHEMA_VERSION: u32 = 1;
+
+    /// Maximum number of records a single paginated query may return (Issue #87).
+    ///
+    /// Requesting more than this is silently clamped so a caller can never ask
+    /// for a result set that would exceed Soroban's ledger entry size limit.
+    const MAX_QUERY_PAGE_SIZE: u64 = 100;
+
+    /// Clamps a caller supplied page size to `MAX_QUERY_PAGE_SIZE`.
+    fn clamp_page_size(limit: u64) -> u64 {
+        core::cmp::min(limit, Self::MAX_QUERY_PAGE_SIZE)
+    }
 
     /// Initialize the refund contract with an admin address.
     ///
@@ -1526,6 +1699,13 @@ impl RefundContract {
 
     /// Migrate the contract schema to a new version.
     ///
+    /// Every data transformation registered for the versions between the
+    /// current schema version and `target_version` is executed **before**
+    /// `target_version` is written to storage. If a single refund record cannot
+    /// be migrated the call returns `Error::Ext(ExtError::SchemaMigrationFailed)`
+    /// and the whole transaction is reverted, so the stored version can never be
+    /// bumped on top of partially migrated (or corrupted) state.
+    ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized and match stored admin).
     /// * `target_version` - The target schema version to migrate to.
@@ -1533,6 +1713,8 @@ impl RefundContract {
     /// # Errors
     /// Returns `Unauthorized` if the caller is not the admin.
     /// Returns `SchemaAlreadyAtTarget` if the current version is already at or past the target.
+    /// Returns `SchemaMigrationFailed` if a data migration step failed, leaving the
+    /// stored version untouched.
     pub fn migrate_schema(env: Env, admin: Address, target_version: u32) -> Result<(), Error> {
         admin.require_auth();
         let stored_admin: Address = env
@@ -1549,10 +1731,49 @@ impl RefundContract {
             return Err(Error::Ext(ExtError::SchemaAlreadyAtTarget));
         }
 
+        // Issue #88: run every data migration first. `target_version` is only
+        // persisted once all transformations have completed successfully.
+        Self::run_data_migrations(&env, current, target_version)?;
+
         env.storage()
             .instance()
             .set(&SystemKey::SchemaVersion, &target_version);
         Ok(())
+    }
+
+    /// Simulates a schema migration and returns an impact report without
+    /// modifying any storage (Issue #89).
+    ///
+    /// The report includes the number of records that would be converted and a
+    /// gas estimate for the migration, letting admins rehearse the migration
+    /// against a live deployment before executing it for real.
+    ///
+    /// This function is read-only: calling it repeatedly with the same target
+    /// version returns an identical report and never advances the schema
+    /// version.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `target_version` - The schema version the migration would move storage to.
+    ///
+    /// # Returns
+    /// A `MigrationReport` describing the migration impact.
+    pub fn dry_run_migrate_schema(env: Env, target_version: u32) -> MigrationReport {
+        let current_version = Self::get_schema_version(env.clone());
+        let refund_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundCounter)
+            .unwrap_or(0);
+        let gas_estimate = MIGRATION_BASE_GAS
+            .saturating_add(MIGRATION_GAS_PER_RECORD.saturating_mul(refund_count));
+        MigrationReport {
+            current_version,
+            target_version,
+            converted_records: refund_count,
+            gas_estimate,
+            dry_run: true,
+        }
     }
 
     /// Propose a new admin, starting a two-step rotation (Issue #389).
@@ -1716,6 +1937,7 @@ impl RefundContract {
     /// # Errors
     /// Returns `RefundNotFound` if no refund exists with the given ID.
     pub fn get_refund(env: &Env, refund_id: u64) -> Result<Refund, Error> {
+        storage::extend_instance(env);
         // Retrieve refund from storage by ID
         env.storage()
             .instance()
@@ -1725,7 +1947,7 @@ impl RefundContract {
 
     /// Approve a pending refund request.
     ///
-    /// Changes the refund status from `Requested` to `Approved` and emits a `RefundApproved` event.
+    /// Changes the refund status from `Requested` to `Approved` and emits a `RefundApprovedEvent` event.
     ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized).
@@ -1746,7 +1968,7 @@ impl RefundContract {
     /// Reject a pending refund request.
     ///
     /// Moves the refund to `PendingAppeal` status with an appeal window, and emits a
-    /// `RefundRejected` event. The customer can file an appeal within the appeal window.
+    /// `RefundDeniedEvent` event. The customer can file an appeal within the appeal window.
     ///
     /// # Arguments
     /// * `admin` - The admin address (must be authorized).
@@ -1772,7 +1994,7 @@ impl RefundContract {
     /// Finalize a denied refund after its appeal window has expired.
     ///
     /// Moves the refund from `PendingAppeal` to `Rejected` status if the appeal window
-    /// has elapsed, and emits a `RefundRejected` event.
+    /// has elapsed, and emits a `RefundDeniedEvent` event.
     ///
     /// # Arguments
     /// * `refund_id` - The ID of the refund to finalize.
@@ -1802,8 +2024,11 @@ impl RefundContract {
 
         Self::remove_from_status_index(&env, RefundStatus::PendingAppeal, refund_id)?;
 
+        // Keep the original denial time (set in begin_refund_rejection);
+        // finalizing must not reopen the appeal window.
+        let denied_at = refund.rejected_at.unwrap_or(now);
         refund.status = RefundStatus::Rejected;
-        refund.rejected_at = Some(now);
+        refund.rejected_at = Some(denied_at);
         env.storage()
             .instance()
             .set(&DataKey::Refund(refund_id), &refund);
@@ -1811,15 +2036,19 @@ impl RefundContract {
         Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
         env.storage()
             .instance()
-            .set(&SystemKey::RefundRejectedAt(refund_id), &now);
+            .set(&SystemKey::RefundRejectedAt(refund_id), &denied_at);
 
         let rejected_by = refund
             .rejected_by
             .clone()
             .unwrap_or(env.current_contract_address());
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by,
             rejected_at: now,
             rejection_reason: soroban_sdk::String::from_str(&env, "appeal window expired"),
@@ -1858,6 +2087,9 @@ impl RefundContract {
 
         refund.status = RefundStatus::PendingAppeal;
         refund.rejected_by = Some(admin.clone());
+        // Denial time: the appeal window runs from here and is not restarted
+        // when the denial is later finalized.
+        refund.rejected_at = Some(now);
         refund.appeal_deadline = Some(now.saturating_add(appeal_window));
 
         env.storage()
@@ -1865,8 +2097,12 @@ impl RefundContract {
             .set(&DataKey::Refund(refund_id), &refund);
         Self::add_to_status_index(env, RefundStatus::PendingAppeal, refund_id);
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by: admin,
             rejected_at: now,
             rejection_reason,
@@ -1878,7 +2114,7 @@ impl RefundContract {
 
     /// File an appeal against a rejected or pending-appeal refund.
     ///
-    /// Creates a new appeal record and emits an `AppealFiled` event. The customer
+    /// Creates a new appeal record and emits an `AppealFiledEvent` event. The customer
     /// must be the refund's customer and the refund must be in a rejected/pending-appeal state.
     ///
     /// # Arguments
@@ -1923,28 +2159,31 @@ impl RefundContract {
             return Err(Error::Core(CoreError::AppealAlreadyFiled));
         }
 
+        // Appeals are allowed only while now <= denied_at + appeal window,
+        // whatever the refund's current status. The deadline fixed at denial
+        // time wins; otherwise derive it from the recorded denial timestamp.
         let now = env.ledger().timestamp();
-        if refund.status == RefundStatus::PendingAppeal {
-            let appeal_deadline = refund
-                .appeal_deadline
-                .ok_or(Error::Core(CoreError::RefundNotRejected))?;
-            if now > appeal_deadline {
-                return Err(Error::Core(CoreError::AppealWindowExpired));
+        let appeal_deadline = match refund.appeal_deadline {
+            Some(deadline) => deadline,
+            None => {
+                let denied_at: u64 = refund
+                    .rejected_at
+                    .or_else(|| {
+                        env.storage()
+                            .instance()
+                            .get(&SystemKey::RefundRejectedAt(refund_id))
+                    })
+                    .ok_or(Error::Core(CoreError::RefundNotRejected))?;
+                let appeal_window: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::AppealWindowSeconds)
+                    .unwrap_or(604800);
+                denied_at.saturating_add(appeal_window)
             }
-        } else {
-            let rejected_at: u64 = env
-                .storage()
-                .instance()
-                .get(&SystemKey::RefundRejectedAt(refund_id))
-                .ok_or(Error::Core(CoreError::RefundNotRejected))?;
-            let appeal_window: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::AppealWindowSeconds)
-                .unwrap_or(604800);
-            if now > rejected_at.saturating_add(appeal_window) {
-                return Err(Error::Core(CoreError::AppealWindowExpired));
-            }
+        };
+        if now > appeal_deadline {
+            return Err(Error::Core(CoreError::AppealWindowExpired));
         }
 
         let counter: u64 = env
@@ -1986,10 +2225,14 @@ impl RefundContract {
             &(customer_count + 1),
         );
 
-        (AppealFiled {
+        (AppealFiledEvent {
             appeal_id,
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
             appellant: customer,
+            reason_code: refund.reason_code.clone(),
+            filed_at: env.ledger().timestamp(),
         })
         .publish(&env);
 
@@ -2116,23 +2359,59 @@ impl RefundContract {
             .ok_or(Error::Core(CoreError::RefundNotFound))
     }
 
-    /// Get all appeals filed by a specific customer.
+    /// Get a page of appeals filed by a specific customer.
+    ///
+    /// Each appeal lives in its own ledger entry under
+    /// `SystemKey::Appeal(appeal_id)`, indexed per customer through
+    /// `SystemKey::AppealByCustomer(customer, index)`. Queries are paginated
+    /// and the page size is capped at `MAX_QUERY_PAGE_SIZE` (Issue #87), so a
+    /// customer with an arbitrarily long appeal history can never return a
+    /// result set larger than a single ledger entry.
     ///
     /// # Arguments
     /// * `customer` - The customer address to query appeals for.
+    /// * `limit` - Maximum number of appeals to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of `RefundAppeal` records filed by the customer.
-    pub fn get_appeals_by_customer(env: Env, customer: Address) -> Vec<RefundAppeal> {
-        let mut appeals = Vec::new(&env);
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&SystemKey::AppealByCustomerCount(customer.clone()))
-            .unwrap_or(0);
+    /// A vector of at most `limit` `RefundAppeal` records filed by the customer,
+    /// oldest first. Empty when `limit` is `0` or `offset` is out of range.
+    pub fn get_appeals_by_customer(
+        env: Env,
+        customer: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<RefundAppeal> {
+        Self::get_appeals_by_customer_internal(&env, &customer, limit, offset)
+    }
 
-        let mut index = 0u64;
-        while index < count {
+    /// Number of appeals filed by a customer.
+    ///
+    /// Use this with [`Self::get_appeals_by_customer`] to page through the full
+    /// appeal history.
+    pub fn get_appeal_count_by_customer(env: Env, customer: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&SystemKey::AppealByCustomerCount(customer))
+            .unwrap_or(0)
+    }
+
+    fn get_appeals_by_customer_internal(
+        env: &Env,
+        customer: &Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<RefundAppeal> {
+        let mut appeals = Vec::new(env);
+        let count = Self::get_appeal_count_by_customer(env.clone(), customer.clone());
+        if limit == 0 || offset >= count {
+            return appeals;
+        }
+
+        let end = core::cmp::min(count, offset.saturating_add(Self::clamp_page_size(limit)));
+        let mut index = offset;
+        while index < end {
             if let Some(appeal_id) = env
                 .storage()
                 .instance()
@@ -3030,15 +3309,23 @@ impl RefundContract {
             .get(&DataKey::Refund(case.refund_id))
             .unwrap();
         if approved {
+            Self::mark_arbitration_award(&env, case.refund_id);
+            // Move the refund in the status index too, or process_refund
+            // can't find it under Approved and the award is never paid.
+            Self::remove_from_status_index(&env, refund.status.clone(), refund.id)?;
             refund.status = RefundStatus::Approved;
             env.storage()
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
+            Self::add_to_status_index(&env, RefundStatus::Approved, refund.id);
 
-            (RefundApproved {
+            (RefundApprovedEvent {
                 refund_id: case.refund_id,
                 payment_id: refund.payment_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
                 amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 approved_by: env.current_contract_address(),
                 approved_at: env.ledger().timestamp(),
             })
@@ -3056,8 +3343,12 @@ impl RefundContract {
             Self::add_to_status_index(&env, RefundStatus::Rejected, refund.id);
             Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
 
-            (RefundRejected {
+            (RefundDeniedEvent {
                 refund_id: case.refund_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
+                amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 rejected_by: env.current_contract_address(),
                 rejected_at: refund.rejected_at.unwrap(),
                 rejection_reason: soroban_sdk::String::from_str(
@@ -3208,7 +3499,10 @@ impl RefundContract {
                     last_active: current_time,
                 });
 
+            // Apply any inactivity decay before the new outcome, since
+            // last_active is about to be reset.
             let old_score = reputation.score;
+            reputation = Self::decayed_reputation(&env, reputation);
 
             // Update vote counts
             reputation.total_cases += 1;
@@ -3443,15 +3737,23 @@ impl RefundContract {
                 .instance()
                 .get(&DataKey::Refund(case.refund_id))
                 .unwrap();
+            Self::mark_arbitration_award(&env, case.refund_id);
+            // Move the refund in the status index too, or process_refund
+            // can't find it under Approved and the award is never paid.
+            Self::remove_from_status_index(&env, refund.status.clone(), refund.id)?;
             refund.status = RefundStatus::Approved;
             env.storage()
                 .instance()
                 .set(&DataKey::Refund(case.refund_id), &refund);
+            Self::add_to_status_index(&env, RefundStatus::Approved, refund.id);
 
-            (RefundApproved {
+            (RefundApprovedEvent {
                 refund_id: case.refund_id,
                 payment_id: refund.payment_id,
+                customer: refund.customer.clone(),
+                merchant: refund.merchant.clone(),
                 amount: refund.amount,
+                reason_code: refund.reason_code.clone(),
                 approved_by: env.current_contract_address(),
                 approved_at: env.ledger().timestamp(),
             })
@@ -3728,7 +4030,10 @@ impl RefundContract {
         Ok(())
     }
 
-    /// Get the reputation information for a specific arbitrator
+    /// Get the reputation information for a specific arbitrator.
+    ///
+    /// The returned `score` has inactivity decay applied (see
+    /// [`Self::set_reputation_decay_config`]).
     pub fn get_arbitrator_reputation(
         env: Env,
         arbitrator: Address,
@@ -3736,6 +4041,82 @@ impl RefundContract {
         env.storage()
             .instance()
             .get(&ArbitrationKey::ArbitratorReputation(arbitrator))
+            .map(|rep| Self::decayed_reputation(&env, rep))
+    }
+
+    /// Configure time-decay of inactive arbitrators' reputation scores.
+    ///
+    /// A positive score loses `decay_bps` (compounded) for every full
+    /// `inactivity_period_secs` since the arbitrator was last active, once
+    /// they have been inactive for longer than one period.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the admin.
+    /// Returns `InvalidReputationDecayConfig` if `decay_bps > 10000` or
+    /// `inactivity_period_secs == 0`.
+    pub fn set_reputation_decay_config(
+        env: Env,
+        admin: Address,
+        decay_bps: u32,
+        inactivity_period_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if decay_bps > 10_000 || inactivity_period_secs == 0 {
+            return Err(Error::Ext(ExtError::InvalidReputationDecayConfig));
+        }
+        env.storage().instance().set(
+            &ArbitrationKey::ReputationDecayConfig,
+            &ReputationDecayConfig {
+                decay_bps,
+                inactivity_period_secs,
+            },
+        );
+        Ok(())
+    }
+
+    /// Get the reputation decay configuration (defaults: 10% per 60 days).
+    pub fn get_reputation_decay_config(env: Env) -> ReputationDecayConfig {
+        env.storage()
+            .instance()
+            .get(&ArbitrationKey::ReputationDecayConfig)
+            .unwrap_or(ReputationDecayConfig {
+                decay_bps: DEFAULT_REPUTATION_DECAY_BPS,
+                inactivity_period_secs: DEFAULT_REPUTATION_INACTIVITY_SECS,
+            })
+    }
+
+    /// Return `rep` with inactivity decay applied to its score, based on the
+    /// ledger timestamp. Only positive scores decay, so inactivity never
+    /// improves a negative score.
+    fn decayed_reputation(env: &Env, mut rep: ArbitratorReputation) -> ArbitratorReputation {
+        if rep.score <= 0 {
+            return rep;
+        }
+        let config = Self::get_reputation_decay_config(env.clone());
+        let inactive_for = env.ledger().timestamp().saturating_sub(rep.last_active);
+        if config.decay_bps == 0 || inactive_for <= config.inactivity_period_secs {
+            return rep;
+        }
+        let periods = core::cmp::min(
+            inactive_for / config.inactivity_period_secs,
+            MAX_REPUTATION_DECAY_PERIODS,
+        );
+        let keep_bps = 10_000i128 - config.decay_bps as i128;
+        for _ in 0..periods {
+            rep.score = rep.score * keep_bps / 10_000;
+            if rep.score == 0 {
+                break;
+            }
+        }
+        rep
     }
 
     /// Get the top arbitrators sorted by score (highest first)
@@ -3764,7 +4145,8 @@ impl RefundContract {
                     arbitrator.clone(),
                 ))
             {
-                reputations.push_back(reputation);
+                // Rank by decayed score so long-inactive arbitrators drop.
+                reputations.push_back(Self::decayed_reputation(&env, reputation));
             }
         }
 
@@ -3829,7 +4211,7 @@ impl RefundContract {
                 .get(&ArbitrationKey::ArbitratorReputation(arbitrator.clone()));
 
             let should_remove = if let Some(rep) = reputation {
-                rep.score < min_score
+                Self::decayed_reputation(&env, rep).score < min_score
             } else {
                 false
             };
@@ -3911,6 +4293,131 @@ impl RefundContract {
         env.storage()
             .instance()
             .get(&ArbitrationKey::ArbitrationFeeConfig)
+    }
+
+    /// Set the protocol maintenance fee deducted from arbitration awards.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the admin.
+    /// Returns `InvalidFeeConfig` if `fee_bps` exceeds `MAX_ARBITRATION_PROTOCOL_FEE_BPS`.
+    pub fn set_arbitration_protocol_fee(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if fee_bps > MAX_ARBITRATION_PROTOCOL_FEE_BPS {
+            return Err(Error::Core(CoreError::InvalidFeeConfig));
+        }
+        env.storage()
+            .instance()
+            .set(&ConfigKey::ArbitrationProtocolFeeBps, &fee_bps);
+        Ok(())
+    }
+
+    /// Get the arbitration protocol fee in basis points (default 2%).
+    pub fn get_arbitration_protocol_fee(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&ConfigKey::ArbitrationProtocolFeeBps)
+            .unwrap_or(DEFAULT_ARBITRATION_PROTOCOL_FEE_BPS)
+    }
+
+    /// Get the protocol fees accumulated (and held by this contract) in `token`.
+    pub fn get_accumulated_protocol_fees(env: Env, token: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&ConfigKey::AccumulatedFees(token))
+            .unwrap_or(0)
+    }
+
+    /// Withdraw all accumulated protocol fees in `token` to `recipient`.
+    ///
+    /// # Returns
+    /// The amount withdrawn.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the admin.
+    /// Returns `InsufficientTreasuryFees` if nothing has accumulated.
+    pub fn withdraw_protocol_fees(
+        env: Env,
+        admin: Address,
+        token: Address,
+        recipient: Address,
+    ) -> Result<i128, Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        let key = ConfigKey::AccumulatedFees(token.clone());
+        let accumulated: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        if accumulated <= 0 {
+            return Err(Error::Core(CoreError::InsufficientTreasuryFees));
+        }
+        env.storage().instance().set(&key, &0i128);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &accumulated,
+        );
+        Ok(accumulated)
+    }
+
+    fn mark_arbitration_award(env: &Env, refund_id: u64) {
+        env.storage()
+            .instance()
+            .set(&ConfigKey::ArbitrationAward(refund_id), &true);
+    }
+
+    /// If `refund_id` was awarded by arbitration, deduct the protocol fee
+    /// from `payout`, credit it to `ConfigKey::AccumulatedFees(token)` (the
+    /// tokens stay in the contract), and return the net payout.
+    fn deduct_arbitration_protocol_fee(
+        env: &Env,
+        refund_id: u64,
+        payout: i128,
+        token: &Address,
+    ) -> i128 {
+        let award_key = ConfigKey::ArbitrationAward(refund_id);
+        if !env.storage().instance().has(&award_key) || payout <= 0 {
+            return payout;
+        }
+        // One-shot: an award is paid out once.
+        env.storage().instance().remove(&award_key);
+
+        let fee_bps = Self::get_arbitration_protocol_fee(env.clone()) as i128;
+        let fee = payout.saturating_mul(fee_bps) / 10_000;
+        if fee <= 0 {
+            return payout;
+        }
+        let fees_key = ConfigKey::AccumulatedFees(token.clone());
+        let accumulated: i128 = env.storage().instance().get(&fees_key).unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&fees_key, &accumulated.saturating_add(fee));
+
+        let net_award = payout - fee;
+        ProtocolFeeCollected {
+            refund_id,
+            token: token.clone(),
+            fee_amount: fee,
+            net_award,
+        }
+        .publish(env);
+        net_award
     }
 
     /// Get the accumulated treasury fees from arbitration cases
@@ -4218,7 +4725,8 @@ impl RefundContract {
     ///
     /// # Arguments
     /// * `status` - The refund status to filter by.
-    /// * `limit` - Maximum number of results to return.
+    /// * `limit` - Maximum number of results to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
     /// * `offset` - Number of results to skip for pagination.
     ///
     /// # Returns
@@ -4236,7 +4744,7 @@ impl RefundContract {
             return results;
         }
 
-        let end = core::cmp::min(total, offset.saturating_add(limit));
+        let end = core::cmp::min(total, offset.saturating_add(Self::clamp_page_size(limit)));
         let mut index = offset;
         while index < end {
             if let Some(refund_id) = env
@@ -4262,7 +4770,8 @@ impl RefundContract {
     ///
     /// # Arguments
     /// * `merchant` - The merchant address to query.
-    /// * `limit` - Maximum number of results to return.
+    /// * `limit` - Maximum number of results to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
     /// * `offset` - Number of results to skip for pagination.
     ///
     /// # Returns
@@ -4280,7 +4789,7 @@ impl RefundContract {
             return results;
         }
 
-        let end = core::cmp::min(total, offset.saturating_add(limit));
+        let end = core::cmp::min(total, offset.saturating_add(Self::clamp_page_size(limit)));
         let mut index = offset;
         while index < end {
             if let Some(refund_id) = env
@@ -4307,7 +4816,8 @@ impl RefundContract {
     /// # Arguments
     /// * `merchant` - The merchant address to query.
     /// * `status` - The refund status to filter by.
-    /// * `limit` - Maximum number of results to return.
+    /// * `limit` - Maximum number of results to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
     /// * `offset` - Number of results to skip for pagination.
     ///
     /// # Returns
@@ -4322,21 +4832,32 @@ impl RefundContract {
         Self::get_merchant_refunds_by_status_internal(&env, &merchant, status, limit, offset)
     }
 
-    /// Get all pending (requested) refunds for a merchant.
+    /// Get a page of pending (requested) refunds for a merchant.
+    ///
+    /// Paginated with the page size capped at `MAX_QUERY_PAGE_SIZE`
+    /// (Issue #87) so a merchant with a long refund backlog cannot return a
+    /// result set larger than a single ledger entry.
     ///
     /// # Arguments
     /// * `merchant` - The merchant address to query.
+    /// * `limit` - Maximum number of refunds to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of all `Refund` entries in `Requested` status for the merchant.
-    pub fn get_merchant_pending_refunds(env: Env, merchant: Address) -> Vec<Refund> {
-        let total = Self::get_merchant_refund_count(&env, &merchant);
+    /// A vector of at most `limit` `Refund` entries in `Requested` status.
+    pub fn get_merchant_pending_refunds(
+        env: Env,
+        merchant: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<Refund> {
         Self::get_merchant_refunds_by_status_internal(
             &env,
             &merchant,
             RefundStatus::Requested,
-            total,
-            0,
+            limit,
+            offset,
         )
     }
 
@@ -5923,6 +6444,43 @@ impl RefundContract {
         Ok(())
     }
 
+    /// Reject a new refund request if the payment already has an active one.
+    ///
+    /// Active means still unresolved: `Requested` (and not TTL-expired),
+    /// `Approved` (awaiting payout), or `PendingAppeal`. Sequential partial
+    /// refunds remain possible once earlier ones are processed or rejected.
+    fn ensure_no_active_refund_for_payment(env: &Env, payment_id: u64) -> Result<(), Error> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentRefundCount(payment_id))
+            .unwrap_or(0);
+        let now = env.ledger().timestamp();
+        for i in 0..count {
+            let refund_id: u64 = match env
+                .storage()
+                .instance()
+                .get(&DataKey::PaymentRefunds(payment_id, i))
+            {
+                Some(id) => id,
+                None => continue,
+            };
+            let refund: Refund = match env.storage().instance().get(&DataKey::Refund(refund_id)) {
+                Some(r) => r,
+                None => continue,
+            };
+            let active = match refund.status {
+                RefundStatus::Requested => refund.expires_at.is_none_or(|exp| now < exp),
+                RefundStatus::Approved | RefundStatus::PendingAppeal => true,
+                RefundStatus::Rejected | RefundStatus::Processed => false,
+            };
+            if active {
+                return Err(Error::Ext(ExtError::ActiveRefundExists));
+            }
+        }
+        Ok(())
+    }
+
     fn create_refund(
         env: Env,
         merchant: Address,
@@ -5944,6 +6502,9 @@ impl RefundContract {
             return Err(Error::Core(CoreError::RefundExceedsPayment));
         }
 
+        // Suspended or sanctioned merchants may not issue refunds.
+        Self::require_merchant_active(&env, &merchant)?;
+
         Self::check_customer_refund_cooldown(&env, &customer)?;
 
         if payment_id == 0 {
@@ -5957,6 +6518,11 @@ impl RefundContract {
         // Skipped entirely when no payment contract is configured, preserving
         // the original backward-compatible behaviour.
         Self::require_payment_state(&env, payment_id, &customer, false)?;
+
+        // Bind rate limiting to the payment as well as the customer address:
+        // fresh throwaway customer addresses can't open parallel refunds
+        // against the same payment.
+        Self::ensure_no_active_refund_for_payment(&env, payment_id)?;
 
         Self::can_refund_payment(&env, payment_id, amount, original_payment_amount)?;
         Self::check_and_update_circuit_breaker(&env, amount, original_payment_amount)?;
@@ -6046,7 +6612,7 @@ impl RefundContract {
             status: initial_status.clone(),
             requested_at: env.ledger().timestamp(),
             reason,
-            reason_code,
+            reason_code: reason_code.clone(),
             // Issue #147: Initialize lifecycle timestamps
             approved_at: if initial_status == RefundStatus::Approved {
                 Some(env.ledger().timestamp())
@@ -6102,13 +6668,15 @@ impl RefundContract {
         // Update payment refund usage for cap tracking
         Self::update_payment_refund_usage(&env, payment_id, amount);
 
-        (RefundRequested {
+        (RefundRequestedEvent {
             refund_id,
             payment_id,
-            merchant,
             customer: customer.clone(),
+            merchant: merchant.clone(),
             amount,
             token,
+            reason_code: refund.reason_code.clone(),
+            requested_at: refund.requested_at,
         })
         .publish(&env);
 
@@ -6156,10 +6724,13 @@ impl RefundContract {
             .set(&DataKey::Refund(refund_id), &refund);
         Self::add_to_status_index(env, RefundStatus::Approved, refund_id);
 
-        (RefundApproved {
+        (RefundApprovedEvent {
             refund_id,
             payment_id: refund.payment_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
             amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             approved_by,
             approved_at: env.ledger().timestamp(),
         })
@@ -6186,13 +6757,9 @@ impl RefundContract {
             return Err(Error::Core(CoreError::InvalidStatus));
         }
 
-        // Issue #70: re-verify payment state immediately before money moves. A
-        // refund can sit in `Approved` for a long time (arbitration, appeal,
-        // batch processing), during which the payment contract may have been
-        // paused or the payment state changed. `allow_refunded` is `true` here
-        // because a payment that already carries a refund legitimately left
-        // `Completed`; `can_refund_payment` below still bounds the amount.
-        Self::require_payment_state(env, refund.payment_id, &refund.customer, true)?;
+        // Re-check standing at payout time: a merchant suspended after the
+        // refund was requested/approved must not have it paid out.
+        Self::require_merchant_active(env, &refund.merchant)?;
 
         Self::can_refund_payment(
             env,
@@ -6201,10 +6768,12 @@ impl RefundContract {
             refund.original_payment_amount,
         )?;
 
-        // Deduct platform fee from refund amount. Issue #71: `fee` carries the
-        // reconciled processing/network breakdown that goes out on the event.
-        let fee = Self::deduct_refund_fee(env, refund_id, refund.amount, &refund.token)?;
-        let net_refund_amount = fee.net_amount;
+        // Deduct platform fee from refund amount
+        let (net_refund_amount, _fee_amount) =
+            Self::deduct_refund_fee(env, refund_id, refund.amount, &refund.token)?;
+        // Arbitration awards additionally carry the protocol maintenance fee.
+        let net_refund_amount =
+            Self::deduct_arbitration_protocol_fee(env, refund_id, net_refund_amount, &refund.token);
 
         if net_refund_amount > 0 {
             token::Client::new(env, &refund.token).transfer(
@@ -7270,7 +7839,8 @@ impl RefundContract {
                 .instance()
                 .get::<_, u64>(&DataKey::CustomerRefunds(customer.clone(), start))
             {
-                env.storage().persistent().set(
+                storage::set_persistent(
+                    env,
                     &DataKey::CustomerRefundsArchive(customer.clone(), start),
                     &archived_id,
                 );
@@ -7294,9 +7864,10 @@ impl RefundContract {
             .get(&DataKey::CustomerRefundHistoryStart(customer.clone()))
             .unwrap_or(0);
         if index < start {
-            env.storage()
-                .persistent()
-                .get(&DataKey::CustomerRefundsArchive(customer.clone(), index))
+            storage::get_persistent(
+                env,
+                &DataKey::CustomerRefundsArchive(customer.clone(), index),
+            )
         } else {
             env.storage()
                 .instance()
@@ -7403,7 +7974,10 @@ impl RefundContract {
 
     // Issue #147: Customer refund history functions
 
-    /// Get paginated refund history for a customer, sorted newest-first
+    /// Get paginated refund history for a customer, sorted newest-first.
+    ///
+    /// The page size is capped at `MAX_QUERY_PAGE_SIZE` (Issue #87) so the
+    /// returned history can never exceed a single ledger entry.
     pub fn get_customer_refund_history(
         env: Env,
         customer: Address,
@@ -7417,15 +7991,15 @@ impl RefundContract {
             return results;
         }
 
-        // Calculate range for newest-first ordering
-        let end = core::cmp::min(total, offset.saturating_add(limit));
+        // Issue #87: never build a result set larger than a single page.
+        let page_size = Self::clamp_page_size(limit);
 
         // Iterate in reverse order (newest first)
         let mut collected = 0u64;
         let mut skipped = 0u64;
         let mut index = total;
 
-        while index > 0 && collected < limit {
+        while index > 0 && collected < page_size {
             index -= 1;
 
             if skipped < offset {
@@ -7796,6 +8370,58 @@ impl RefundContract {
         }
     }
 
+    // ── Merchant standing ─────────────────────────────────────────────────
+
+    /// Set a merchant's standing. Admin only.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the contract admin.
+    pub fn set_merchant_status(
+        env: Env,
+        admin: Address,
+        merchant: Address,
+        status: MerchantStatus,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+
+        env.storage()
+            .instance()
+            .set(&EligibilityKey::MerchantStatus(merchant.clone()), &status);
+
+        MerchantStatusUpdated {
+            merchant,
+            status,
+            updated_by: admin,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns a merchant's standing, defaulting to `Active` when unset.
+    pub fn get_merchant_status(env: Env, merchant: Address) -> MerchantStatus {
+        env.storage()
+            .instance()
+            .get(&EligibilityKey::MerchantStatus(merchant))
+            .unwrap_or(MerchantStatus::Active)
+    }
+
+    fn require_merchant_active(env: &Env, merchant: &Address) -> Result<(), Error> {
+        if Self::get_merchant_status(env.clone(), merchant.clone()) != MerchantStatus::Active {
+            return Err(Error::Ext(ExtError::MerchantNotEligible));
+        }
+        Ok(())
+    }
+
     // ── Issue #148: Customer eligibility registry ─────────────────────────
 
     /// Set or update the refund eligibility rule for a customer under a specific merchant.
@@ -7985,6 +8611,8 @@ impl RefundContract {
         offset: u64,
     ) -> Vec<Refund> {
         let mut results: Vec<Refund> = Vec::new(env);
+        // Issue #87: never scan more than a single page worth of matches.
+        let limit = Self::clamp_page_size(limit);
         if limit == 0 {
             return results;
         }
@@ -8475,8 +9103,12 @@ impl RefundContract {
         Self::add_to_status_index(&env, RefundStatus::Rejected, refund_id);
         Self::release_payment_refund_usage(&env, refund.payment_id, refund.amount);
 
-        (RefundRejected {
+        (RefundDeniedEvent {
             refund_id,
+            customer: refund.customer.clone(),
+            merchant: refund.merchant.clone(),
+            amount: refund.amount,
+            reason_code: refund.reason_code.clone(),
             rejected_by: env.current_contract_address(),
             rejected_at: env.ledger().timestamp(),
             rejection_reason: soroban_sdk::String::from_str(&env, "TTL expired"),
@@ -8934,22 +9566,36 @@ impl RefundContract {
             .get(&VoucherKey::Voucher(voucher_id))
     }
 
-    /// Get all refund vouchers issued to a customer.
+    /// Get a page of refund vouchers issued to a customer.
+    ///
+    /// Vouchers are stored individually under `VoucherKey::Voucher(voucher_id)`
+    /// and indexed per customer, so the query is paginated and the page size is
+    /// capped at `MAX_QUERY_PAGE_SIZE` (Issue #87).
     ///
     /// # Arguments
     /// * `customer` - The customer address to query.
+    /// * `limit` - Maximum number of vouchers to return (capped at
+    ///   `MAX_QUERY_PAGE_SIZE`).
+    /// * `offset` - Number of index slots to skip for pagination.
     ///
     /// # Returns
-    /// A vector of `RefundVoucher` entries for the customer.
-    pub fn get_customer_vouchers(env: Env, customer: Address) -> Vec<RefundVoucher> {
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&VoucherKey::CustomerVoucherCount(customer.clone()))
-            .unwrap_or(0);
+    /// A vector of at most `limit` `RefundVoucher` entries for the customer.
+    /// Empty when `limit` is `0` or `offset` is out of range.
+    pub fn get_customer_vouchers(
+        env: Env,
+        customer: Address,
+        limit: u64,
+        offset: u64,
+    ) -> Vec<RefundVoucher> {
+        let count = Self::get_customer_voucher_count(env.clone(), customer.clone());
         let mut results = Vec::new(&env);
-        let mut i = 0u64;
-        while i < count {
+        if limit == 0 || offset >= count {
+            return results;
+        }
+
+        let end = core::cmp::min(count, offset.saturating_add(Self::clamp_page_size(limit)));
+        let mut i = offset;
+        while i < end {
             if let Some(vid) = env
                 .storage()
                 .instance()
@@ -8966,6 +9612,16 @@ impl RefundContract {
             i += 1;
         }
         results
+    }
+
+    /// Number of refund vouchers issued to a customer.
+    ///
+    /// Use this with [`Self::get_customer_vouchers`] to page through the full list.
+    pub fn get_customer_voucher_count(env: Env, customer: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&VoucherKey::CustomerVoucherCount(customer))
+            .unwrap_or(0)
     }
 
     // ── Issue #194: Tiered arbitration escalation ─────────────────────────
@@ -9465,7 +10121,16 @@ mod test_voucher_expiry;
 mod schema_version_test;
 
 #[cfg(test)]
+mod test_schema_migration;
+
+#[cfg(test)]
+mod test_paginated_queries;
+
+#[cfg(test)]
 mod test_merchant_override_and_error_codes;
 
 #[cfg(test)]
 mod test_admin_rotation;
+
+#[cfg(test)]
+mod test_refund_events;

@@ -1,6 +1,6 @@
 # Admin Contract
 
-Part of the [Cypher GridPay smart contracts](../../README.md) suite on Stellar/Soroban.
+Part of the [Cypher GridPay smart contracts](../../../README.md) suite on Stellar/Soroban.
 
 ## Purpose
 
@@ -11,67 +11,37 @@ The admin contract gates privileged operations across the other contracts. It ac
 ### Admin Address
 
 - The admin is a single `Address` stored in contract instance storage under the `Admin` data key.
-- It is set **once** during `initialize(admin, payment_contract, escrow_contract, refund_contract)` and cannot be changed after initialization.
+- It is set **once** during `initialize(admin, pauser, payment_contract, escrow_contract, refund_contract)` and cannot be changed after initialization.
 - Calling `initialize` a second time returns `Error::AlreadyInitialized`.
 - The admin address must authorize the `initialize` call via Soroban authentication (`require_auth()`).
+
+### Pauser Address
+
+- A separate `Pauser` address is stored alongside the admin. Only the pauser can trigger `emergency_pause_all` / `emergency_unpause_all`.
+- The pauser address is forwarded to each child contract's `pause_contract` / `unpause_contract`, so it must also be an admin on the payment, escrow, and refund contracts. If any child rejects it, the whole call reverts and nothing is paused.
 
 ### Permission Checks
 
 Every privileged function performs two authorization checks:
 
-1. **Authentication** — the caller must pass Soroban's `require_auth()` for the supplied admin address.
-2. **Authorization** — the caller's address must match the stored admin address exactly. A mismatch returns `Error::Unauthorized`.
+1. **Authentication** — the caller must pass Soroban's `require_auth()` for the supplied admin/pauser address.
+2. **Authorization** — the caller's address must match the stored admin (or pauser) address exactly. A mismatch returns `Error::Unauthorized`.
 
 ### Privileged Operations
 
 | Function | Description | Admin Required |
 |---|---|---|
-| `initialize(admin, pauser, payment_contract, escrow_contract, refund_contract)` | Deploys and configures the contract with the admin, the pauser, and the child contract addresses. | Yes (sets the admin) |
-| `emergency_pause_all(pauser, reason)` | Atomically pauses the payment, escrow, and refund contracts in one call. | Pauser |
-| `emergency_unpause_all(pauser)` | Atomically unpauses all three child contracts. | Pauser |
-| `get_coordination_status()` | Read-only. Returns each child's pause state plus an aggregate `consistent` flag. | No |
-| `set_payment_contract` / `set_escrow_contract` / `set_refund_contract` | Repoints a managed slot at a new contract. | Yes |
+| `initialize(admin, pauser, payment_contract, escrow_contract, refund_contract)` | Configures the contract with the admin, pauser, and child contract addresses. | Yes (sets the admin) |
+| `emergency_pause_all(pauser, reason)` | Pauses the payment, escrow, and refund contracts in one call. | Pauser |
+| `emergency_unpause_all(pauser)` | Unpauses the payment, escrow, and refund contracts in one call. Idempotent. | Pauser |
+| `set_payment_contract(admin, payment_contract)` | Repoints the orchestrator at a new payment contract (e.g. after an upgrade). | Admin |
+| `set_escrow_contract(admin, escrow_contract)` | Repoints the orchestrator at a new escrow contract. | Admin |
+| `set_refund_contract(admin, refund_contract)` | Repoints the orchestrator at a new refund contract. | Admin |
+| `ping()` | Extends the contract instance TTL. Permissionless. | No |
 
-## Atomic Emergency Pause (issue #73)
+### Instance TTL
 
-Pausing three contracts from one call is only safe if it is all-or-nothing.
-Without coordination, a failure on the second contract leaves the platform in a
-**split state** — for example payment paused while escrow still accepts
-operations — which is worse than not pausing at all during an incident.
-
-`emergency_pause_all` and `emergency_unpause_all` therefore run a four-step
-sequence:
-
-1. **Load** all three managed addresses. If any is missing the call reverts with
-   `NotInitialized` *before* any child is touched.
-2. **Pre-flight.** Each child's `get_pause_state().globally_paused` is read. If
-   any child is already in the target state the call reverts with
-   `ChildAlreadyInTargetState`, so an already-inconsistent set is never made
-   worse by a second partial attempt.
-3. **Apply.** Each child is invoked through `try_pause_contract` /
-   `try_unpause_contract`. Any child error is converted into
-   `ChildContractCallFailed`, which reverts the whole Soroban transaction —
-   including the writes already made to the children processed earlier in the
-   sequence.
-4. **Verify.** All three children are read back. If they do not all agree the
-   call reverts with `ChildStateVerificationFailed`.
-
-Step 4 also covers the case where a child accepts the call but silently no-ops
-(for example a version mismatch that drops the function), which a return-value
-check alone would miss.
-
-### Observing Coordination State
-
-`get_coordination_status()` returns a `CoordinationStatus`:
-
-| Field | Meaning |
-|---|---|
-| `payment_paused` / `escrow_paused` / `refund_paused` | `globally_paused` as reported by each child. `false` when the child cannot be read. |
-| `consistent` | `true` only when all three children were readable **and** all three report the same pause state. |
-| `children` | One `ContractPauseStatus { contract, address, paused, reachable }` per managed contract, for targeted alerting. |
-
-An unreachable child is never treated as "agreeing" — it is surfaced with
-`reachable: false` and forces `consistent: false`.
+Every administrative call extends the contract's instance TTL to `INSTANCE_BUMP_AMOUNT` (~30 days) once it drops below `INSTANCE_LIFETIME_THRESHOLD`. Between admin actions, a keeper should call `ping()` periodically so the orchestrator is never archived — an archived orchestrator cannot trigger an emergency pause until it is restored.
 
 ### Error Codes
 
@@ -93,11 +63,24 @@ An unreachable child is never treated as "agreeing" — it is surfaced with
 - `get_coordination_status()` is permissionless on purpose: monitoring must be able to detect a split state even while the platform is mid-incident.
 
 
+## Incident Response
+
+See the [Operational Runbook](../../../docs/OPERATIONAL_RUNBOOK.md) for step-by-step Stellar CLI procedures to trigger an emergency pause, verify it, inspect state after an incident, upgrade contracts, and resume operations.
+
+## Testing
+
+```bash
+cd orchestrator && cargo test --workspace
+```
+
+The suite lives in [`src/test.rs`](src/test.rs).
+
 ---
 
 ## See Also
 
-- [Root README](../../README.md) — architecture overview and workspace setup
-- [Payment Contract](../payment/README.md)
-- [Escrow Contract](../escrow/README.md)
-- [Refund Contract](../refund/README.md)
+- [Root README](../../../README.md) — architecture overview and workspace setup
+- [Operational Runbook](../../../docs/OPERATIONAL_RUNBOOK.md)
+- [Payment Contract](../../../core/contracts/payment/README.md)
+- [Escrow Contract](../../../core/contracts/escrow/README.md)
+- [Refund Contract](../../../core/contracts/refund/README.md)
