@@ -268,6 +268,7 @@ pub enum ActionError {
     ApprovalsThresholdNotMet = 314,
     /// Deposited collateral balance is insufficient for this operation. Resolution: fund additional collateral to escrow.
     InsufficientCollateral = 315,
+    ArbitrationRequired = 316,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -314,7 +315,7 @@ impl TryFrom<soroban_sdk::Error> for Error {
     fn try_from(error: soroban_sdk::Error) -> Result<Self, Self::Error> {
         if error.is_type(soroban_sdk::xdr::ScErrorType::Contract) {
             let code = error.get_code();
-            if code >= 300 && code <= 315 {
+            if code >= 300 && code <= 316 {
                 return Ok(Error::Action(unsafe { core::mem::transmute(code) }));
             }
             if code >= 200 && code <= 229 {
@@ -4902,7 +4903,26 @@ impl EscrowContract {
             return Err(Error::Escrow(EscrowError::TimeoutNotReached));
         }
 
-        let favor = escrow.auto_resolve_in_favor_of.clone();
+        // Evidence-aware default: a timeout must not silently favor the configured
+        // party when only one side produced evidence, and it cannot decide fairly
+        // when both sides did. Only an evidence-free dispute falls back to the
+        // configured default.
+        let (customer_evidence, merchant_evidence) =
+            EscrowContract::evidence_submission_status(&env, escrow_id);
+
+        if customer_evidence && merchant_evidence {
+            // Both parties filed evidence: escalating to a human/third-party
+            // arbitrator is required instead of auto-refunding the customer.
+            return Err(Error::Action(ActionError::ArbitrationRequired));
+        }
+
+        let favor = if customer_evidence {
+            AutoResolveFavor::Customer
+        } else if merchant_evidence {
+            AutoResolveFavor::Merchant
+        } else {
+            escrow.auto_resolve_in_favor_of.clone()
+        };
 
         // CEI: persist the final status and remove the escrow from the
         // escalation queue before any token transfer.
@@ -6350,6 +6370,29 @@ impl EscrowContract {
     /// Weighted auto-resolve: each piece of evidence contributes the submitter's
     /// reputation score to their side's total weight rather than a raw count.
     /// Returns `true` if the merchant side outweighs the customer side.
+    /// Returns `(customer_submitted, merchant_submitted)` describing which of the
+    /// two escrow parties have filed dispute evidence for `escrow_id`.
+    fn evidence_submission_status(env: &Env, escrow_id: u64) -> (bool, bool) {
+        let escrow = EscrowContract::get_escrow(env, escrow_id);
+        let total = EscrowContract::get_evidence_count(env, escrow_id);
+        let mut customer_submitted = false;
+        let mut merchant_submitted = false;
+        let mut i: u64 = 0;
+        while i < total {
+            if let Some(ev) = env.storage().instance().get::<DataKey, Evidence>(
+                &DataKey::Escrow(EscrowKey::Evidence(escrow_id, i)),
+            ) {
+                if ev.submitter == escrow.customer {
+                    customer_submitted = true;
+                } else if ev.submitter == escrow.merchant {
+                    merchant_submitted = true;
+                }
+            }
+            i += 1;
+        }
+        (customer_submitted, merchant_submitted)
+    }
+
     fn weighted_auto_resolve(env: &Env, escrow_id: u64) -> bool {
         let escrow = EscrowContract::get_escrow(env, escrow_id);
         let total = EscrowContract::get_evidence_count(env, escrow_id);
