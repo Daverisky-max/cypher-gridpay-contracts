@@ -42,11 +42,11 @@ jobs:
           git diff --exit-code
 
       - name: Clippy Lints (core)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: core
 
       - name: Clippy Lints (orchestrator)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: orchestrator
 
       - name: Build Contracts (core)
@@ -69,11 +69,14 @@ jobs:
         run: cargo test --workspace 2>&1 | tee test-output.txt
         working-directory: orchestrator
 
-      - name: Upload test output artifact
-        uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: test-output
-          path: |
-            core/test-output.txt
-            orchestrator/test-output.txt
+      - name: Build WASM Target (core)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --target wasm32-unknown-unknown --release
+        working-directory: core
+
+      - name: Build WASM Target (orchestrator)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --target wasm32-unknown-unknown --release
+        working-directory: orchestrator
