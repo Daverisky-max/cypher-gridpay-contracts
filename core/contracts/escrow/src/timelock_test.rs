@@ -58,9 +58,10 @@ use crate::*;
 
         let action_id = client.queue_action(&admin, &escrow_id, &action_type, &data);
 
-        // Try to execute immediately - should fail
+        // Try to execute immediately - should fail with TimelockNotElapsed since the
+        // security delay (timelock) has not yet elapsed
         let result = client.try_execute_queued_action(&action_id);
-        assert_eq!(result, Err(Ok(Error::Action(ActionError::NotReady))));
+        assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::TimelockNotElapsed))));
     }
 
     #[test]

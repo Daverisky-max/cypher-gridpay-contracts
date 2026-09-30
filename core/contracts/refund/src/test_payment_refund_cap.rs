@@ -3,6 +3,23 @@
 use super::*;
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
+/// A payment may only have one active refund at a time, so pay each refund
+/// out before requesting the next one against the same payment.
+fn settle(client: &RefundContractClient, admin: &Address, refund_id: u64) {
+    client.approve_refund(admin, &refund_id);
+    client.process_refund(admin, &refund_id);
+}
+
+fn funded_token(env: &Env, holder: &Address) -> Address {
+    let token = env
+        .register_stellar_asset_contract_v2(Address::generate(env))
+        .address();
+    soroban_sdk::token::StellarAssetClient::new(env, &token)
+        .mock_all_auths()
+        .mint(holder, &1_000_000);
+    token
+}
+
 #[test]
 fn test_set_payment_refund_cap() {
     let env = Env::default();
@@ -59,7 +76,7 @@ fn test_refund_count_cap_exceeded() {
     let admin = Address::generate(&env);
     let merchant = Address::generate(&env);
     let customer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = funded_token(&env, &contract_id);
     let payment_id = 1u64;
     let reason = String::from_str(&env, "Customer requested");
 
@@ -87,6 +104,7 @@ fn test_refund_count_cap_exceeded() {
         &0,
     );
     assert!(res1.is_ok());
+    settle(&client, &admin, res1.unwrap().unwrap());
 
     // Second refund should succeed
     let res2 = client.try_request_refund(
@@ -101,6 +119,7 @@ fn test_refund_count_cap_exceeded() {
         &0,
     );
     assert!(res2.is_ok());
+    settle(&client, &admin, res2.unwrap().unwrap());
 
     // Third refund should fail with RefundCountCapExceeded
     let res3 = client.try_request_refund(
@@ -130,7 +149,7 @@ fn test_refund_amount_cap_exceeded() {
     let admin = Address::generate(&env);
     let merchant = Address::generate(&env);
     let customer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = funded_token(&env, &contract_id);
     let payment_id = 1u64;
     let reason = String::from_str(&env, "Customer requested");
 
@@ -158,6 +177,7 @@ fn test_refund_amount_cap_exceeded() {
         &0,
     );
     assert!(res1.is_ok());
+    settle(&client, &admin, res1.unwrap().unwrap());
 
     // Second refund: 200 (total: 400, within 500 limit)
     let res2 = client.try_request_refund(
@@ -172,6 +192,7 @@ fn test_refund_amount_cap_exceeded() {
         &0,
     );
     assert!(res2.is_ok());
+    settle(&client, &admin, res2.unwrap().unwrap());
 
     // Third refund: 150 (total would be 550, exceeds 500 limit)
     let res3 = client.try_request_refund(
@@ -201,7 +222,7 @@ fn test_cumulative_amount_enforcement() {
     let admin = Address::generate(&env);
     let merchant = Address::generate(&env);
     let customer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = funded_token(&env, &contract_id);
     let payment_id = 1u64;
     let reason = String::from_str(&env, "Customer requested");
 
@@ -222,13 +243,14 @@ fn test_cumulative_amount_enforcement() {
         &payment_id,
         &customer,
         &400,
-        &1000,
+        &10_000, // large payment, so the refund cap is what binds
         &token,
         &reason,
         &RefundReasonCode::CustomerRequest,
         &0,
     );
     assert!(res1.is_ok());
+    settle(&client, &admin, res1.unwrap().unwrap());
 
     let (count1, amount1) = client.get_payment_refund_usage(&payment_id);
     assert_eq!(count1, 1);
@@ -240,13 +262,14 @@ fn test_cumulative_amount_enforcement() {
         &payment_id,
         &customer,
         &350,
-        &1000,
+        &10_000, // large payment, so the refund cap is what binds
         &token,
         &reason,
         &RefundReasonCode::CustomerRequest,
         &0,
     );
     assert!(res2.is_ok());
+    settle(&client, &admin, res2.unwrap().unwrap());
 
     let (count2, amount2) = client.get_payment_refund_usage(&payment_id);
     assert_eq!(count2, 2);
@@ -258,7 +281,7 @@ fn test_cumulative_amount_enforcement() {
         &payment_id,
         &customer,
         &300,
-        &1000,
+        &10_000, // large payment, so the refund cap is what binds
         &token,
         &reason,
         &RefundReasonCode::CustomerRequest,
@@ -276,13 +299,14 @@ fn test_cumulative_amount_enforcement() {
         &payment_id,
         &customer,
         &250,
-        &1000,
+        &10_000, // large payment, so the refund cap is what binds
         &token,
         &reason,
         &RefundReasonCode::CustomerRequest,
         &0,
     );
     assert!(res4.is_ok());
+    settle(&client, &admin, res4.unwrap().unwrap());
 
     let (count4, amount4) = client.get_payment_refund_usage(&payment_id);
     assert_eq!(count4, 3);
@@ -298,7 +322,7 @@ fn test_no_cap_allows_unlimited() {
     let admin = Address::generate(&env);
     let merchant = Address::generate(&env);
     let customer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = funded_token(&env, &contract_id);
     let payment_id = 1u64;
     let reason = String::from_str(&env, "Customer requested");
 
@@ -321,6 +345,7 @@ fn test_no_cap_allows_unlimited() {
             &0,
         );
         assert!(res.is_ok(), "Refund {} should succeed without cap", i + 1);
+        settle(&client, &admin, res.unwrap().unwrap());
     }
 
     let (count, amount) = client.get_payment_refund_usage(&payment_id);
@@ -337,7 +362,7 @@ fn test_multiple_payments_independent_caps() {
     let admin = Address::generate(&env);
     let merchant = Address::generate(&env);
     let customer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = funded_token(&env, &contract_id);
     let reason = String::from_str(&env, "Customer requested");
 
     env.mock_all_auths();
@@ -373,6 +398,7 @@ fn test_multiple_payments_independent_caps() {
             &0,
         );
         assert!(res.is_ok(), "Payment 1 refund {} should succeed", i + 1);
+        settle(&client, &admin, res.unwrap().unwrap());
     }
 
     // Third refund for payment 1 should fail
@@ -403,6 +429,7 @@ fn test_multiple_payments_independent_caps() {
             &0,
         );
         assert!(res.is_ok(), "Payment 2 refund {} should succeed", i + 1);
+        settle(&client, &admin, res.unwrap().unwrap());
     }
 
     let (count1, amount1) = client.get_payment_refund_usage(&1);
@@ -514,7 +541,7 @@ fn test_exact_boundary_amount() {
     let admin = Address::generate(&env);
     let merchant = Address::generate(&env);
     let customer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = funded_token(&env, &contract_id);
     let payment_id = 1u64;
     let reason = String::from_str(&env, "Customer requested");
 
@@ -542,6 +569,7 @@ fn test_exact_boundary_amount() {
         &0,
     );
     assert!(res1.is_ok());
+    settle(&client, &admin, res1.unwrap().unwrap());
 
     // Any additional amount should fail
     let res2 = client.try_request_refund(
@@ -571,7 +599,7 @@ fn test_exact_boundary_count() {
     let admin = Address::generate(&env);
     let merchant = Address::generate(&env);
     let customer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let token = funded_token(&env, &contract_id);
     let payment_id = 1u64;
     let reason = String::from_str(&env, "Customer requested");
 
@@ -599,6 +627,7 @@ fn test_exact_boundary_count() {
         &0,
     );
     assert!(res1.is_ok());
+    settle(&client, &admin, res1.unwrap().unwrap());
 
     // Second refund succeeds
     let res2 = client.try_request_refund(
@@ -613,6 +642,7 @@ fn test_exact_boundary_count() {
         &0,
     );
     assert!(res2.is_ok());
+    settle(&client, &admin, res2.unwrap().unwrap());
 
     // Third refund fails
     let res3 = client.try_request_refund(

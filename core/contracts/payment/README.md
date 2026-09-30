@@ -53,9 +53,9 @@ The payment contract is the core of the Cypher GridPay platform. It handles the 
 
 | Function                                   | Description                                                |
 | ------------------------------------------ | ---------------------------------------------------------- |
-| `get_payments_by_customer(customer, page)` | Paginated list of payment IDs for a customer.              |
+| `get_payments_by_customer(customer, limit, offset)` | Paginated list of payments for a customer (max 100 per page). |
 | `get_payment_count_by_customer(customer)`  | Total number of payments for a customer.                   |
-| `get_payments_by_merchant(merchant, page)` | Paginated list of payment IDs for a merchant.              |
+| `get_payments_by_merchant(merchant, limit, offset)` | Paginated list of payments for a merchant (max 100 per page). |
 | `get_payment_count_by_merchant(merchant)`  | Total number of payments for a merchant.                   |
 | `get_merchant_payments(merchant, page)`    | Alternative paginated index of payment IDs for a merchant. |
 
@@ -92,7 +92,8 @@ If a requested aggregate has no recorded data, the contract returns a zero-value
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `pay_installment(payer, payment_id, installment_amount)` | Payer submits one installment towards a payment's outstanding balance.                  |
 | `finalize_installment_payment(payment_id)`               | Mark a fully-paid installment payment as `Completed` and release funds to the merchant. |
-| `get_installment_history(payment_id)`                    | Return all installment records for a payment.                                           |
+| `get_installment_history(payment_id, limit, offset)`    | Paginated installment records for a payment, newest first (max 100 per page).          |
+| `get_installment_count(payment_id)`                     | Total number of installments recorded for a payment.                                    |
 | `get_outstanding_balance(payment_id)`                    | Return the remaining unpaid balance of an installment payment.                          |
 
 `pay_installment` moves real tokens from the customer into the contract while the payment
@@ -598,7 +599,8 @@ completion — integrators do not need to do anything special when calling `comp
 | `configure_finality_delay(admin, delay_seconds)` | Set a holding period before merchant settlements are finalised.       |
 | `get_finality_config()`                          | Return the current finality delay configuration.                      |
 | `finalize_pending_settlement(payment_id)`        | Release a settlement that has passed its finality delay.              |
-| `get_pending_settlements(merchant)`              | List all settlements waiting out their finality delay for a merchant. |
+| `get_pending_settlements(merchant, limit, offset)` | Paginated settlements waiting out their finality delay (max 100 per page). |
+| `get_pending_settlement_count(merchant)`         | Number of settlement index slots held by a merchant.         |
 
 ### Fee Management
 
