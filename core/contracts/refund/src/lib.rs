@@ -4,6 +4,8 @@ use soroban_sdk::{
     BytesN, Env, FromVal, IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
 
+pub mod storage;
+
 #[cfg(test)]
 extern crate std;
 
@@ -1759,6 +1761,7 @@ impl RefundContract {
     /// # Errors
     /// Returns `RefundNotFound` if no refund exists with the given ID.
     pub fn get_refund(env: &Env, refund_id: u64) -> Result<Refund, Error> {
+        storage::extend_instance(env);
         // Retrieve refund from storage by ID
         env.storage()
             .instance()
@@ -7091,7 +7094,8 @@ impl RefundContract {
                 .instance()
                 .get::<_, u64>(&DataKey::CustomerRefunds(customer.clone(), start))
             {
-                env.storage().persistent().set(
+                storage::set_persistent(
+                    env,
                     &DataKey::CustomerRefundsArchive(customer.clone(), start),
                     &archived_id,
                 );
@@ -7115,9 +7119,10 @@ impl RefundContract {
             .get(&DataKey::CustomerRefundHistoryStart(customer.clone()))
             .unwrap_or(0);
         if index < start {
-            env.storage()
-                .persistent()
-                .get(&DataKey::CustomerRefundsArchive(customer.clone(), index))
+            storage::get_persistent(
+                env,
+                &DataKey::CustomerRefundsArchive(customer.clone(), index),
+            )
         } else {
             env.storage()
                 .instance()
