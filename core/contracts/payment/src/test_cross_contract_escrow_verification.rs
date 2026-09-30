@@ -262,3 +262,38 @@ fn test_cross_contract_verify_unrelated_address_is_not_participant() {
     let unrelated = Address::generate(&env);
     assert!(!escrow_client.verify_escrow_participant(&escrow_id, &unrelated));
 }
+
+// ── Cross-contract failure: atomic rollback ──────────────────────────────────
+
+// When the external escrow contract cannot be reached (here: the address is
+// not a registered contract), `create_escrowed_payment` must fail with
+// `EscrowCreationFailed` and must NOT persist any payment state. This proves
+// the internal storage write happens only after the cross-contract escrow
+// creation succeeds.
+#[test]
+fn test_create_escrowed_payment_rolls_back_on_escrow_failure() {
+    let (env, payment_client, _escrow_client, customer, merchant, _admin, token) = setup_env();
+
+    // A fresh, unregistered address is not a valid escrow contract, so the
+    // cross-contract invocation will fail.
+    let bogus_escrow = Address::generate(&env);
+
+    let result = payment_client.try_create_escrowed_payment(
+        &customer,
+        &merchant,
+        &500_i128,
+        &token,
+        &Currency::USDC,
+        &bogus_escrow,
+        &5000_u64,
+        &0_u64,
+        &String::from_str(&env, "rollback-test"),
+        &true,
+    );
+
+    // The call must surface the descriptive cross-contract error.
+    assert_eq!(result, Err(Ok(PaymentError::EscrowCreationFailed)));
+
+    // No payment state may have been written: the next payment id is still 1.
+    assert_eq!(payment_client.get_next_payment_id(), 1);
+}
