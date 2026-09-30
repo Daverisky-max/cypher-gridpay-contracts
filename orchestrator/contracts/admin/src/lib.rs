@@ -258,6 +258,10 @@ impl AdminContract {
 
     /// Pauses the payment, escrow, and refund contracts in one Soroban call.
     ///
+    /// Issue #73: mirrors [`emergency_pause_all`](Self::emergency_pause_all) so
+    /// unpausing is atomic too - a child that refuses to unpause reverts the
+    /// whole transaction instead of leaving the platform half-live.
+    ///
     /// # Parameters
     /// - `pauser`: the pauser address that must be authorized.
     /// - `reason`: a human-readable explanation for the emergency pause.
@@ -296,12 +300,16 @@ impl AdminContract {
     /// - `justification`: a human-readable explanation for the emergency unpause.
     ///
     /// # Returns
-    /// Returns `Ok(())` when all child contracts are unpaused successfully.
+    /// Returns `Ok(())` when all child contracts are unpaused successfully and the
+    /// post-condition holds.
     ///
     /// # Errors
     /// Returns `Error::NotInitialized` if the admin contract has not been initialized,
-    /// and `Error::Unauthorized` if the provided pauser address does not match the
-    /// stored pauser.
+    /// `Error::Unauthorized` if the pauser does not match the stored pauser,
+    /// `Error::ChildAlreadyInTargetState` if any child is already unpaused,
+    /// `Error::ChildContractCallFailed` if a child refuses to unpause, and
+    /// `Error::ChildStateVerificationFailed` if the read-back does not show all
+    /// three children unpaused.
     pub fn emergency_unpause_all(env: Env, pauser: Address) -> Result<(), Error> {
         pauser.require_auth();
         Self::require_pauser(&env, &pauser)?;
@@ -1007,15 +1015,14 @@ mod test {
     fn test_get_system_status() {
         let env = Env::default();
         env.mock_all_auths();
-
         let admin_contract_id = env.register(AdminContract, ());
-        let client = AdminContractClient::new(&env, &admin_contract_id);
+        let client = AdminContractClient::new(env, &admin_contract_id);
 
-        let admin = Address::generate(&env);
-        let pauser = Address::generate(&env);
-        let payment_contract = setup_payment(&env, &pauser);
-        let escrow_contract = setup_escrow(&env, &pauser);
-        let refund_contract = setup_refund(&env, &pauser);
+        let admin = Address::generate(env);
+        let pauser = Address::generate(env);
+        let payment_contract = setup_payment(env, &pauser);
+        let escrow_contract = setup_escrow(env, &pauser);
+        let refund_contract = setup_refund(env, &pauser);
 
         client.initialize(
             &admin,
@@ -1024,6 +1031,31 @@ mod test {
             &escrow_contract,
             &refund_contract,
         );
+        (
+            client,
+            admin,
+            pauser,
+            payment_contract,
+            escrow_contract,
+            refund_contract,
+        )
+    }
+
+    fn reason(env: &Env) -> String {
+        String::from_str(env, "security incident")
+    }
+
+    fn is_globally_paused(env: &Env, child: &Address) -> bool {
+        let args = ().into_val(env);
+        let state: payments::PauseState =
+            env.invoke_contract(child, &Symbol::new(env, "get_pause_state"), args);
+        state.globally_paused
+    }
+
+    #[test]
+    fn test_initialize_and_pause_all() {
+        let env = Env::default();
+        let (client, _admin, pauser, _, _, _) = setup(&env);
 
         // Freshly initialized: nothing paused, every contract at schema version 1.
         let status = client.get_system_status();

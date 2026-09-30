@@ -1,6 +1,9 @@
 // This contract uses a multi-level enum structure for DataKey and Error to stay within
 // Soroban's 50-variant XDR limit. Each sub-enum must have <= 50 variants.
 #![no_std]
+
+#[cfg(test)]
+extern crate std;
 use escrow::EscrowContractClient;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, token, xdr::ToXdr, Address,
@@ -1291,6 +1294,23 @@ pub struct Payment {
     pub metadata: String,
     pub notes: String,
     pub refunded_amount: i128,
+}
+
+/// Issue #70: primitive-only cross-contract verification result consumed by the
+/// refund contract. Deliberately contains no `PaymentStatus` or `Payment` field
+/// so a schema change on this side cannot break decoding on the other side.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct PaymentVerification {
+    /// `false` when the payment contract is paused and therefore cannot vouch
+    /// for any state. Callers must treat this as a hard failure.
+    pub payment_contract_available: bool,
+    /// The payment ID resolves to a stored payment.
+    pub exists: bool,
+    /// The stored payment's status is `Completed`.
+    pub is_completed: bool,
+    /// The stored payment belongs to the queried customer.
+    pub owned_by_customer: bool,
 }
 
 #[derive(Clone)]
@@ -3304,14 +3324,85 @@ impl PaymentContract {
 
     /// Used by the refund contract for cross-contract ownership verification (#143).
     /// Returns true if the payment exists, belongs to `customer`, and is Completed.
+    ///
+    /// # Arguments
+    /// * `payment_id` - The payment ID to verify.
+    /// * `customer` - The customer address to verify ownership for.
+    ///
+    /// # Returns
+    /// `true` only when this contract is available (not paused), the payment
+    /// exists, is `Completed`, and belongs to `customer`.
+    ///
+    /// # Panics
+    /// Never panics. Issue #70: a paused payment contract must make the refund
+    /// contract fail safely rather than let a refund through against state the
+    /// payment contract can no longer vouch for.
     pub fn check_payment_customer(env: Env, payment_id: u64, customer: Address) -> bool {
-        let payment: Option<Payment> = env
+        let verification = Self::get_payment_verification(env, payment_id, customer);
+        verification.payment_contract_available
+            && verification.exists
+            && verification.is_completed
+            && verification.owned_by_customer
+    }
+
+    /// Cross-contract state verification for the refund contract (issue #70).
+    ///
+    /// Every field is a primitive so the caller never has to decode an enum or
+    /// struct it might not know: if the payment contract's schema ever drifts,
+    /// the call still decodes and the caller can fail safely on
+    /// `payment_contract_available == false` instead of hitting an opaque host
+    /// error.
+    ///
+    /// # Arguments
+    /// * `payment_id` - The payment ID to verify.
+    /// * `customer` - The customer address the refund would be paid to.
+    ///
+    /// # Returns
+    /// A `PaymentVerification` with:
+    /// - `payment_contract_available`: `false` when this contract is globally
+    ///   paused or when `get_payment_verification` itself is paused, so callers
+    ///   can distinguish "the payment contract cannot answer" from "the answer is
+    ///   no".
+    /// - `exists`: the payment ID resolves to a stored payment.
+    /// - `is_completed`: the payment status is `Completed`.
+    /// - `owned_by_customer`: the stored payment's customer matches.
+    pub fn get_payment_verification(
+        env: Env,
+        payment_id: u64,
+        customer: Address,
+    ) -> PaymentVerification {
+        // A paused payment contract must not vouch for anything: the refund
+        // contract has to fail safely rather than trust state the payment
+        // contract can no longer service.
+        if Self::is_function_paused(
+            env.clone(),
+            String::from_str(&env, "get_payment_verification"),
+        ) {
+            return PaymentVerification {
+                payment_contract_available: false,
+                exists: false,
+                is_completed: false,
+                owned_by_customer: false,
+            };
+        }
+
+        match env
             .storage()
             .instance()
-            .get(&DataKey::Payment(PaymentKey::Data(payment_id)));
-        match payment {
-            Some(p) => p.customer == customer && p.status == PaymentStatus::Completed,
-            None => false,
+            .get::<DataKey, Payment>(&DataKey::Payment(PaymentKey::Data(payment_id)))
+        {
+            Some(p) => PaymentVerification {
+                payment_contract_available: true,
+                exists: true,
+                is_completed: p.status == PaymentStatus::Completed,
+                owned_by_customer: p.customer == customer,
+            },
+            None => PaymentVerification {
+                payment_contract_available: true,
+                exists: false,
+                is_completed: false,
+                owned_by_customer: false,
+            },
         }
     }
 

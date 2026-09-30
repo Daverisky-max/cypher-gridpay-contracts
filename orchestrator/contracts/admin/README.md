@@ -48,14 +48,20 @@ Every administrative call extends the contract's instance TTL to `INSTANCE_BUMP_
 | Code | Constant | Description |
 |---|---|---|
 | 1 | `AlreadyInitialized` | `initialize` was called more than once. |
-| 2 | `NotInitialized` | A privileged function was called before `initialize`. |
-| 3 | `Unauthorized` | The caller's address does not match the stored admin. |
+| 2 | `NotInitialized` | A privileged function was called before `initialize`, or a managed slot is unset. |
+| 3 | `Unauthorized` | The caller's address does not match the stored admin/pauser. |
+| 4 | `ChildContractCallFailed` | A child contract refused to pause or unpause. The whole transaction reverts. |
+| 5 | `ChildAlreadyInTargetState` | Pre-flight found a child already in the target state; nothing was mutated. |
+| 6 | `ChildStateVerificationFailed` | Post-conditions were not met after every child reported success. |
 
 ## Security Considerations
 
 - The admin address should be a **multi-sig** or **governance contract** address, never a single private key, to avoid a single point of failure.
-- Because `emergency_pause_all` halts all child contracts, the admin key should be treated as a high-value credential and stored securely (e.g., in a hardware wallet or threshold-signing scheme).
+- The pauser is a separate credential from the admin so emergency response does not require the long-term admin key. It should follow the same multi-sig guidance.
+- Because `emergency_pause_all` halts all child contracts, the pauser key should be treated as a high-value credential and stored securely (e.g., in a hardware wallet or threshold-signing scheme).
 - There is no `transfer_admin` or `renounce_admin` function — the admin role is permanent. Review deployment scripts carefully before calling `initialize`.
+- `get_coordination_status()` is permissionless on purpose: monitoring must be able to detect a split state even while the platform is mid-incident.
+
 
 ## Incident Response
 

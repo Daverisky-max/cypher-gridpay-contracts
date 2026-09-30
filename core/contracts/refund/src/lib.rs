@@ -20,6 +20,16 @@ std::thread_local! {
 // to avoid LengthExceedsMax error from large #[contracttype] enums
 pub type StorageKey = (Symbol, Option<Address>, Option<u64>, Option<u32>);
 
+/// Issue #71: share of a deducted refund fee that is attributed to Stellar
+/// network resource costs (rent + inclusion fees) rather than to payment-gateway
+/// processing, in basis points of the *total* fee.
+///
+/// 25% keeps the default split deterministic for `calculate_net_refund`, which
+/// deliberately takes only `(gross_amount, fee_bps)` so the math is a pure
+/// function that can be verified off-chain. A deployment can override the split
+/// per merchant through `set_refund_fee_config`.
+pub const DEFAULT_NETWORK_FEE_SHARE_BPS: u32 = 2_500;
+
 /// Construct a tuple-based storage key from its components.
 ///
 /// Uses `Symbol::new` with `Env::default()` to create the prefix symbol.
@@ -64,9 +74,13 @@ pub enum DataKey {
     PoolToken(u64),
     DefaultRefundPolicy,
     RefundPolicy(Address),
-    // Policy versioning (#134)
-    RefundPolicyVersion(Address, u32),
-    RefundPolicyVersionCount(Address),
+    // Policy versioning (#134) lives in `PolicyKey::RefundPolicyVersion{,Count}`.
+    // Issue #86: these variants used to be duplicated here as well. Because a
+    // `#[contracttype]` key serializes to `Vec[Symbol(variant_name), fields..]`
+    // — the *name*, not the enum's position — the duplicate spelling produced
+    // byte-identical storage keys, silently aliasing the two namespaces. The
+    // duplicates were removed; `PolicyKey` is now the single owner and the
+    // on-chain encoding is unchanged, so no migration is required.
     RefundPolicyTemplate(u64),
     RefundPolicyTemplateCount,
     // Payment contract address (#143)
@@ -134,6 +148,8 @@ pub enum ConfigKey {
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub enum PolicyKey {
+    // Sole owner of the versioned-policy namespace (issue #86). `DataKey` must
+    // never spell these variant names again — see the note on `DataKey`.
     RefundPolicyVersion(Address, u32),
     RefundPolicyVersionCount(Address),
     AutoRefundTrigger(u64),
@@ -466,7 +482,19 @@ pub struct RefundProcessed {
     pub refund_id: u64,
     pub processed_by: Address,
     pub customer: Address,
+    /// Gross refund amount, i.e. the amount originally requested and approved.
     pub amount: i128,
+    /// Issue #71: `amount - total_fee`, the amount actually transferred to the
+    /// customer. Equal to `amount` when no fee configuration is active.
+    pub net_amount: i128,
+    /// Issue #71: `processing_fee + network_fee`.
+    pub total_fee: i128,
+    /// Issue #71: portion of `total_fee` attributed to gateway processing.
+    pub processing_fee: i128,
+    /// Issue #71: portion of `total_fee` attributed to network resource costs.
+    pub network_fee: i128,
+    /// Issue #71: rate the fee was computed at, in basis points.
+    pub fee_bps: u32,
     pub token: Address,
     pub processed_at: u64,
 }
@@ -1125,8 +1153,55 @@ pub struct GlobalRefundRateLimit {
     pub next_config_effective_at: u64,
 }
 
+/// Issue #70: mirror of `payments::PaymentVerification`.
+///
+/// The refund contract does not depend on the payments crate, so this repeats
+/// the wire format exactly: `#[contracttype]` structs encode as
+/// `Map<Symbol(field_name), Val>`, so matching field names and types is all that
+/// is required for the two types to interoperate. Kept primitive-only for the
+/// same reason - there is no `PaymentStatus` to fall out of sync.
+///
+/// `test_cross_contract.rs` asserts this mirror stays byte-compatible with the
+/// payment contract's own type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct PaymentContractVerification {
+    /// `false` when the payment contract is paused and therefore cannot vouch
+    /// for any state.
+    pub payment_contract_available: bool,
+    /// The payment ID resolves to a stored payment.
+    pub exists: bool,
+    /// The stored payment's status is `Completed`.
+    pub is_completed: bool,
+    /// The stored payment belongs to the queried customer.
+    pub owned_by_customer: bool,
+}
+
+/// Issue #70: result of verifying payment-contract state before a cross-contract
+/// refund. Every field is a primitive so the refund contract can never fail to
+/// decode a response because the payment contract's schema moved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct PaymentStateVerification {
+    /// A payment contract address is configured for this refund contract.
+    pub payment_contract_configured: bool,
+    /// The cross-contract call completed without error.
+    pub payment_contract_reachable: bool,
+    /// The payment contract reports it is not paused and able to answer.
+    pub payment_contract_available: bool,
+    /// The payment ID resolves to a stored payment.
+    pub payment_exists: bool,
+    /// The payment status is `Completed`.
+    pub payment_completed: bool,
+    /// The payment belongs to the customer being refunded.
+    pub owned_by_customer: bool,
+    /// `payment_exists && payment_completed && owned_by_customer` and the
+    /// payment contract was reachable and available.
+    pub refundable: bool,
+}
+
 /// Configuration for platform fee deduction on refund processing
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct RefundFeeConfig {
     pub fee_bps: u32,       // Fee in basis points (e.g., 100 = 1%)
@@ -1135,6 +1210,36 @@ pub struct RefundFeeConfig {
     pub treasury: Address,  // Address to receive fees
     pub fee_token: Address, // Token in which fees are collected
     pub active: bool,       // Whether fee collection is enabled
+    // Issue #71: split of `fee_bps` between gateway processing and Stellar
+    // network resource costs (rent + inclusion fees), in basis points of the
+    // total fee. `0` attributes the whole fee to processing, `10_000` to the
+    // network. The remainder after the network share is processing.
+    pub network_fee_share_bps: u32,
+}
+
+/// Issue #71: result of splitting a gross refund into the amount paid to the
+/// customer and the fees retained by the protocol.
+///
+/// `net_amount + total_fee == gross_amount` always holds, and
+/// `processing_fee + network_fee == total_fee` always holds, so the breakdown
+/// always reconciles exactly - no rounding drift is ever left unaccounted for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct NetRefund {
+    /// The refund amount before any fee deduction.
+    pub gross_amount: i128,
+    /// Total fee rate applied, in basis points (1% == 100).
+    pub fee_bps: u32,
+    /// `processing_fee + network_fee`.
+    pub total_fee: i128,
+    /// Portion of the fee attributed to payment-gateway processing.
+    pub processing_fee: i128,
+    /// Portion of the fee attributed to Stellar network resource costs.
+    pub network_fee: i128,
+    /// `gross_amount - total_fee`; the amount actually transferred to the customer.
+    pub net_amount: i128,
+    /// Share of `total_fee` attributed to the network, in basis points.
+    pub network_fee_share_bps: u32,
 }
 
 /// Per-customer refund cooldown configuration
@@ -1437,6 +1542,10 @@ pub struct RefundFeeDeducted {
     pub refund_id: u64,
     pub fee_amount: i128,
     pub net_refund_amount: i128,
+    /// Issue #71: the reconciled gross -> net breakdown behind `fee_amount`.
+    pub processing_fee: i128,
+    /// Issue #71: the reconciled gross -> net breakdown behind `fee_amount`.
+    pub network_fee: i128,
     pub treasury: Address,
 }
 
@@ -1447,6 +1556,8 @@ pub struct RefundFeeConfigUpdated {
     pub fee_bps: u32,
     pub min_fee: i128,
     pub max_fee: i128,
+    /// Issue #71: network share of the fee, in basis points of the total fee.
+    pub network_fee_share_bps: u32,
     pub updated_by: Address,
 }
 
@@ -3679,7 +3790,7 @@ impl RefundContract {
         let version_count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::RefundPolicyVersionCount(merchant.clone()))
+            .get(&PolicyKey::RefundPolicyVersionCount(merchant.clone()))
             .unwrap_or(0);
         let new_version = version_count + 1;
         let versioned = RefundPolicyVersion {
@@ -3689,11 +3800,11 @@ impl RefundContract {
             created_by,
         };
         env.storage().instance().set(
-            &DataKey::RefundPolicyVersion(merchant.clone(), new_version),
+            &PolicyKey::RefundPolicyVersion(merchant.clone(), new_version),
             &versioned,
         );
         env.storage().instance().set(
-            &DataKey::RefundPolicyVersionCount(merchant.clone()),
+            &PolicyKey::RefundPolicyVersionCount(merchant.clone()),
             &new_version,
         );
 
@@ -4317,34 +4428,210 @@ impl RefundContract {
             .unwrap_or(0)
     }
 
-    /// Withdraw accumulated treasury fees
-    /// Requires admin authorization
-    /// Returns the amount withdrawn
+    /// Splits a gross refund into the amount paid to the customer and the fees
+    /// retained by the protocol. Issue #71.
+    ///
+    /// This is a pure function of its two arguments, so the exact same math can
+    /// be reproduced off-chain to show a customer their payout before they sign.
+    /// The processing/network split uses
+    /// [`DEFAULT_NETWORK_FEE_SHARE_BPS`]; `set_refund_fee_config` can override it
+    /// per deployment.
+    ///
+    /// # Arguments
+    /// * `gross_amount` - the refund amount before any fee deduction.
+    /// * `fee_bps` - total fee rate in basis points (1% == 100). Values above
+    ///   10_000 are treated as 10_000 so `net_amount` can never go negative.
+    ///
+    /// # Returns
+    /// A [`NetRefund`] whose fields always reconcile:
+    /// `net_amount + total_fee == gross_amount` and
+    /// `processing_fee + network_fee == total_fee`.
+    pub fn calculate_net_refund(gross_amount: i128, fee_bps: u32) -> NetRefund {
+        Self::split_net_refund(gross_amount, fee_bps, DEFAULT_NETWORK_FEE_SHARE_BPS)
+    }
+
+    /// Shared arithmetic behind [`calculate_net_refund`](Self::calculate_net_refund).
+    ///
+    /// `network_share_bps` is clamped to `10_000`. The network fee is computed
+    /// first and processing takes the remainder, so the two components always sum
+    /// back to the total instead of drifting apart by a rounding unit.
+    fn split_net_refund(gross_amount: i128, fee_bps: u32, network_share_bps: u32) -> NetRefund {
+        let capped_bps = fee_bps.min(10_000);
+        let capped_share = network_share_bps.min(10_000);
+
+        // Nothing to refund: report the gross amount for transparency but charge
+        // no fee, so a malformed amount can never produce a negative payout.
+        if gross_amount <= 0 {
+            return NetRefund {
+                gross_amount,
+                fee_bps: capped_bps,
+                total_fee: 0,
+                processing_fee: 0,
+                network_fee: 0,
+                net_amount: 0,
+                network_fee_share_bps: capped_share,
+            };
+        }
+
+        let total_fee = gross_amount.saturating_mul(capped_bps as i128) / 10_000;
+        let network_fee = total_fee.saturating_mul(capped_share as i128) / 10_000;
+        let processing_fee = total_fee - network_fee;
+        let net_amount = gross_amount - total_fee;
+
+        NetRefund {
+            gross_amount,
+            fee_bps: capped_bps,
+            total_fee,
+            processing_fee,
+            network_fee,
+            net_amount,
+            network_fee_share_bps: capped_share,
+        }
+    }
+
+    /// Stores the refund fee configuration. Issue #71.
+    ///
+    /// # Arguments
+    /// * `admin` - the contract admin (must be authorized).
+    /// * `config` - the fee configuration to store.
+    ///
+    /// # Errors
+    /// Returns `Unauthorized` if the caller is not the stored admin, and
+    /// `InvalidFeeConfig` if `fee_bps > 10_000` or
+    /// `network_fee_share_bps > 10_000`.
+    pub fn set_refund_fee_config(
+        env: Env,
+        admin: Address,
+        config: RefundFeeConfig,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if config.fee_bps > 10_000 || config.network_fee_share_bps > 10_000 {
+            return Err(Error::Core(CoreError::InvalidFeeConfig));
+        }
+        if config.min_fee < 0 || config.max_fee < 0 {
+            return Err(Error::Core(CoreError::InvalidFeeConfig));
+        }
+        if config.max_fee > 0 && config.min_fee > config.max_fee {
+            return Err(Error::Core(CoreError::InvalidFeeConfig));
+        }
+
+        env.storage()
+            .instance()
+            .set(&SystemKey::RefundFeeConfig, &config);
+
+        (RefundFeeConfigUpdated {
+            fee_bps: config.fee_bps,
+            min_fee: config.min_fee,
+            max_fee: config.max_fee,
+            network_fee_share_bps: config.network_fee_share_bps,
+            updated_by: admin,
+        })
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns the stored refund fee configuration, if any. Issue #71.
+    pub fn get_refund_fee_config(env: Env) -> Option<RefundFeeConfig> {
+        env.storage().instance().get(&SystemKey::RefundFeeConfig)
+    }
+
+    /// Computes the net refund for `gross_amount` using the stored configuration.
+    ///
+    /// Returns the gross amount untouched when no configuration exists or the
+    /// configuration is inactive. Issue #71.
+    pub fn preview_net_refund(env: Env, gross_amount: i128) -> NetRefund {
+        let config: RefundFeeConfig = match env
+            .storage()
+            .instance()
+            .get::<SystemKey, RefundFeeConfig>(&SystemKey::RefundFeeConfig)
+        {
+            Some(c) if c.active => c,
+            _ => {
+                return Self::split_net_refund(gross_amount, 0, DEFAULT_NETWORK_FEE_SHARE_BPS);
+            }
+        };
+        let mut split =
+            Self::split_net_refund(gross_amount, config.fee_bps, config.network_fee_share_bps);
+        if split.total_fee > 0 {
+            // `min_fee` / `max_fee` bound the *total*, so clamp first and then
+            // re-derive the split so the breakdown still reconciles. A bound of
+            // `0` means "unset", matching `set_refund_fee_config` validation.
+            let mut clamped = split.total_fee;
+            if config.min_fee > 0 {
+                clamped = clamped.max(config.min_fee);
+            }
+            if config.max_fee > 0 {
+                clamped = clamped.min(config.max_fee);
+            }
+            if clamped != split.total_fee {
+                split = Self::split_net_refund(split.gross_amount, 0, config.network_fee_share_bps);
+                split.fee_bps = config.fee_bps;
+                split.total_fee = clamped;
+                split.network_fee =
+                    clamped.saturating_mul(config.network_fee_share_bps as i128) / 10_000;
+                split.processing_fee = clamped - split.network_fee;
+                split.net_amount = split.gross_amount - clamped;
+            }
+        }
+        split
+    }
+
+    /// Applies the configured fee to a refund payout, transferring the fee to the
+    /// treasury and returning the reconciled breakdown. Issue #71.
+    ///
+    /// # Returns
+    /// A [`NetRefund`] whose `net_amount` is what the customer receives. When no
+    /// configuration exists or it is inactive, `total_fee` is `0` and
+    /// `net_amount == amount`.
     fn deduct_refund_fee(
         env: &Env,
         refund_id: u64,
         amount: i128,
         token: &Address,
-    ) -> Result<(i128, i128), Error> {
+    ) -> Result<NetRefund, Error> {
         let config: RefundFeeConfig =
             match env.storage().instance().get(&SystemKey::RefundFeeConfig) {
                 Some(c) => c,
-                None => return Ok((amount, 0)),
+                None => {
+                    return Ok(Self::split_net_refund(
+                        amount,
+                        0,
+                        DEFAULT_NETWORK_FEE_SHARE_BPS,
+                    ));
+                }
             };
         if !config.active {
-            return Ok((amount, 0));
+            return Ok(Self::split_net_refund(
+                amount,
+                0,
+                DEFAULT_NETWORK_FEE_SHARE_BPS,
+            ));
         }
-        let raw_fee = amount
-            .saturating_mul(config.fee_bps as i128)
-            .checked_div(10_000)
-            .unwrap_or(0);
-        let fee = raw_fee.max(config.min_fee).min(config.max_fee);
-        let net = amount.saturating_sub(fee);
-        if fee > 0 {
-            token::Client::new(env, token).transfer(
+
+        let split = Self::preview_net_refund(env.clone(), amount);
+        if split.total_fee > 0 {
+            // Issue #71: the fee is taken in `token` when the treasury is
+            // configured to collect in the same asset, otherwise in
+            // `config.fee_token`. Falling back keeps the previous behaviour for
+            // configs that never set `fee_token`.
+            let fee_token = if config.fee_token == *token {
+                token.clone()
+            } else {
+                config.fee_token.clone()
+            };
+            token::Client::new(env, &fee_token).transfer(
                 &env.current_contract_address(),
                 &config.treasury,
-                &fee,
+                &split.total_fee,
             );
             let accumulated: i128 = env
                 .storage()
@@ -4353,17 +4640,19 @@ impl RefundContract {
                 .unwrap_or(0);
             env.storage().instance().set(
                 &SystemKey::AccumulatedRefundFees,
-                &accumulated.saturating_add(fee),
+                &accumulated.saturating_add(split.total_fee),
             );
             (RefundFeeDeducted {
                 refund_id,
-                fee_amount: fee,
-                net_refund_amount: net,
+                fee_amount: split.total_fee,
+                net_refund_amount: split.net_amount,
+                processing_fee: split.processing_fee,
+                network_fee: split.network_fee,
                 treasury: config.treasury,
             })
             .publish(env);
         }
-        Ok((net, fee))
+        Ok(split)
     }
 
     pub fn withdraw_treasury_fees(env: Env, admin: Address) -> Result<i128, Error> {
@@ -6014,34 +6303,145 @@ impl RefundContract {
 
     /// Verify that a customer owns a given payment via a cross-contract call.
     ///
+    /// Retained as a boolean convenience wrapper over
+    /// [`verify_payment_state`](Self::verify_payment_state) for existing
+    /// integrations. Any failure - the payment contract being unset, unreachable,
+    /// paused, or reporting a non-`Completed` payment - is reported as `false`,
+    /// which is fail-closed. Callers that need to distinguish *why* should use
+    /// `verify_payment_state`.
+    ///
     /// # Arguments
     /// * `payment_id` - The payment ID to verify.
     /// * `customer` - The customer address to verify ownership for.
     ///
     /// # Returns
-    /// `true` if the payment exists, belongs to the customer, and is completed.
-    /// Returns `false` if no payment contract is set or verification fails.
+    /// `true` only when the payment contract confirms the payment exists, is
+    /// `Completed`, and belongs to `customer`.
     pub fn verify_payment_ownership(env: Env, payment_id: u64, customer: Address) -> bool {
-        let payment_contract: Address = match env
+        Self::verify_payment_state(env, payment_id, customer)
+            .map(|v| v.refundable)
+            .unwrap_or(false)
+    }
+
+    /// Verifies payment-contract state before a cross-contract refund (#70).
+    ///
+    /// Calls `get_payment_verification` on the configured payment contract and
+    /// reports each precondition separately, so a caller can tell "the payment
+    /// contract could not be reached" apart from "the payment is not complete".
+    ///
+    /// # Arguments
+    /// * `payment_id` - The payment ID to verify.
+    /// * `customer` - The customer the refund would be paid to.
+    ///
+    /// # Returns
+    /// `Ok(PaymentStateVerification)` when the payment contract answered (or is
+    /// simply not configured, in which case `payment_contract_configured` is
+    /// `false` and verification is skipped for backward compatibility).
+    ///
+    /// # Errors
+    /// Returns `PaymentContractCallFailed` when the cross-contract invocation
+    /// itself failed - the address is not a contract, the function is missing, or
+    /// the call reverted. This is distinct from a successful `false` answer: a
+    /// failed call means the refund contract could not establish payment state,
+    /// and it must fail safely rather than assume the worst.
+    pub fn verify_payment_state(
+        env: Env,
+        payment_id: u64,
+        customer: Address,
+    ) -> Result<PaymentStateVerification, Error> {
+        let payment_contract: Option<Address> = env
             .storage()
             .instance()
-            .get(&DataKey::PaymentContractAddress)
-        {
+            .get(&DataKey::PaymentContractAddress);
+
+        let payment_contract = match payment_contract {
+            // Backward compatible: with no payment contract configured there is
+            // nothing to verify against.
+            None => {
+                return Ok(PaymentStateVerification {
+                    payment_contract_configured: false,
+                    payment_contract_reachable: false,
+                    payment_contract_available: false,
+                    payment_exists: false,
+                    payment_completed: false,
+                    owned_by_customer: false,
+                    refundable: false,
+                });
+            }
             Some(addr) => addr,
-            None => return false, // no contract set → skip verification
         };
-        // Cross-contract call to payment_contract.check_payment_customer(payment_id, customer).
-        // That function returns bool: true if payment exists, belongs to customer, and is Completed.
-        let func = Symbol::new(&env, "check_payment_customer");
+
+        let func = Symbol::new(&env, "get_payment_verification");
         let args = (payment_id, customer).into_val(&env);
-        match env.try_invoke_contract::<bool, soroban_sdk::InvokeError>(
-            &payment_contract,
-            &func,
-            args,
-        ) {
-            Ok(Ok(result)) => result,
-            _ => false,
+        let raw = env
+            .try_invoke_contract::<PaymentContractVerification, soroban_sdk::InvokeError>(
+                &payment_contract,
+                &func,
+                args,
+            )
+            .map_err(|_| Error::Ext(ExtError::PaymentContractCallFailed))?;
+
+        let verification: PaymentContractVerification =
+            raw.map_err(|_| Error::Ext(ExtError::PaymentContractCallFailed))?;
+
+        let refundable = verification.payment_contract_available
+            && verification.exists
+            && verification.is_completed
+            && verification.owned_by_customer;
+
+        Ok(PaymentStateVerification {
+            payment_contract_configured: true,
+            payment_contract_reachable: true,
+            payment_contract_available: verification.payment_contract_available,
+            payment_exists: verification.exists,
+            payment_completed: verification.is_completed,
+            owned_by_customer: verification.owned_by_customer,
+            refundable,
+        })
+    }
+
+    /// Internal gate used before a refund is recorded or paid out (#70).
+    ///
+    /// Fails with a specific error for each broken precondition so merchants get
+    /// an actionable code instead of a generic mismatch:
+    /// - the payment contract could not be reached -> `PaymentContractCallFailed`
+    /// - the payment contract is paused -> `PaymentContractUnavailable`
+    /// - no such payment -> `InvalidPaymentId`
+    /// - status is not `Completed` (or already refunded) -> `PaymentNotCompleted`
+    /// - the payment belongs to someone else -> `PaymentOwnershipMismatch`
+    ///
+    /// `allow_refunded` is `true` on the payout path: once a payment has been
+    /// (partially) refunded its status legitimately leaves `Completed`, and
+    /// `can_refund_payment` already bounds the remaining amount.
+    fn require_payment_state(
+        env: &Env,
+        payment_id: u64,
+        customer: &Address,
+        allow_refunded: bool,
+    ) -> Result<(), Error> {
+        let verification = Self::verify_payment_state(env.clone(), payment_id, customer.clone())?;
+        if !verification.payment_contract_configured {
+            return Ok(());
         }
+        if !verification.payment_contract_reachable {
+            return Err(Error::Ext(ExtError::PaymentContractCallFailed));
+        }
+        if !verification.payment_contract_available {
+            return Err(Error::Ext(ExtError::PaymentContractUnavailable));
+        }
+        if !verification.payment_exists {
+            return Err(Error::Core(CoreError::InvalidPaymentId));
+        }
+        if !verification.owned_by_customer {
+            return Err(Error::Core(CoreError::PaymentOwnershipMismatch));
+        }
+        // Issue #70: a refund may only be recorded against a settled payment. On
+        // the payout path an already-refunded payment is acceptable, because
+        // issuing the refund is what moved it out of `Completed`.
+        if !verification.payment_completed && !allow_refunded {
+            return Err(Error::Ext(ExtError::PaymentNotCompleted));
+        }
+        Ok(())
     }
 
     /// Reject a new refund request if the payment already has an active one.
@@ -6111,17 +6511,13 @@ impl RefundContract {
             return Err(Error::Core(CoreError::InvalidPaymentId));
         }
 
-        if env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::PaymentContractAddress)
-            .is_some()
-        {
-            let owned = Self::verify_payment_ownership(env.clone(), payment_id, customer.clone());
-            if !owned {
-                return Err(Error::Core(CoreError::PaymentOwnershipMismatch));
-            }
-        }
+        // Issue #70: verify payment-contract state before recording a refund.
+        // Replaces the previous boolean `check_payment_customer` call, which
+        // collapsed "contract unreachable", "payment not found", "payment not
+        // completed" and "wrong customer" into one indistinguishable `false`.
+        // Skipped entirely when no payment contract is configured, preserving
+        // the original backward-compatible behaviour.
+        Self::require_payment_state(&env, payment_id, &customer, false)?;
 
         // Bind rate limiting to the payment as well as the customer address:
         // fresh throwaway customer addresses can't open parallel refunds
@@ -6430,6 +6826,11 @@ impl RefundContract {
             processed_by,
             customer: refund.customer,
             amount: refund.amount,
+            net_amount: fee.net_amount,
+            total_fee: fee.total_fee,
+            processing_fee: fee.processing_fee,
+            network_fee: fee.network_fee,
+            fee_bps: fee.fee_bps,
             token: refund.token,
             processed_at: env.ledger().timestamp(),
         })
@@ -9680,6 +10081,9 @@ mod test_batch;
 
 #[cfg(test)]
 mod test_cross_contract;
+
+#[cfg(test)]
+mod test_storage_keys;
 
 #[cfg(test)]
 mod test_arbitration_fees;
