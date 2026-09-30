@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::*;
+use soroban_sdk::testutils::Events;
 use soroban_sdk::testutils::Ledger;
 use soroban_sdk::{testutils::Address as _, token, Address, Env};
 
@@ -77,6 +78,49 @@ fn test_expire_disputed_escrow_fails() {
     // Advance past expiry
     env.ledger().set_timestamp(4000);
     let result = client.try_expire_escrow(&escrow_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_refund_expired_escrow_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, customer, merchant, token) = setup(&env);
+
+    env.ledger().set_timestamp(1000);
+    let escrow_id = client.create_escrow(
+        &customer, &merchant, &500_i128, &token, &2000_u64, &0_u64, &3000_u64, &true,
+    );
+
+    let token_client = token::Client::new(&env, &token);
+    let buyer_balance_before = token_client.balance(&customer);
+
+    // Advance past expiry
+    env.ledger().set_timestamp(3001);
+
+    client.refund_expired_escrow(&customer, &escrow_id);
+
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::ExpiredRefunded);
+
+    let buyer_balance_after = token_client.balance(&customer);
+    assert_eq!(buyer_balance_after, buyer_balance_before + 500_i128);
+}
+
+#[test]
+fn test_refund_expired_escrow_premature_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, customer, merchant, token) = setup(&env);
+
+    env.ledger().set_timestamp(1000);
+    let escrow_id = client.create_escrow(
+        &customer, &merchant, &500_i128, &token, &2000_u64, &0_u64, &3000_u64, &true,
+    );
+
+    // Still before expiry
+    env.ledger().set_timestamp(2500);
+    let result = client.try_refund_expired_escrow(&customer, &escrow_id);
     assert!(result.is_err());
 }
 
