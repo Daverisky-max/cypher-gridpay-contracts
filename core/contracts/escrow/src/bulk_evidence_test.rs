@@ -324,3 +324,21 @@ fn test_batch_rejected_after_evidence_deadline() {
         Err(Ok(Error::Action(ActionError::EvidenceDeadlinePassed)))
     );
 }
+
+/// Evidence hashes longer than 64 bytes (SHA-256 hex length) must be rejected
+/// with EvidenceLimitExceeded to prevent storage bloat.
+#[test]
+fn test_batch_rejected_when_hash_exceeds_max_length() {
+    let env = Env::default();
+    let (client, _admin, customer, merchant, token) = setup(&env);
+    let escrow_id = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
+
+    let mut items: Vec<Bytes> = Vec::new(&env);
+    items.push_back(Bytes::from_array(&env, &[0xabu8; 65]));
+
+    let result = client.try_submit_evidence_batch(&customer, &escrow_id, &items);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(EscrowError::EvidenceLimitExceeded)))
+    );
+}
