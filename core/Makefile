@@ -5,6 +5,11 @@ all: test
 test: build
 	cargo test
 
+# Refresh Soroban test snapshots after an SDK upgrade.
+# Usage: make update-snapshots  (equivalent to UPDATE_SNAPSHOTS=1 cargo test)
+update-snapshots:
+	UPDATE_SNAPSHOTS=1 cargo test
+
 build:
 	stellar contract build
 	@ls -l target/wasm32v1-none/release/*.wasm
